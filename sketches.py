@@ -2,6 +2,8 @@ import torch
 from torch import nn 
 from torch_scatter import scatter_mean, scatter
 
+from build_data import build_data_obj
+
 '''
 Sketching out ideas to try to improve temporal prop
 ''' 
@@ -112,6 +114,57 @@ def recursive_temporal_prop_no_repeats(layer, batch, times, x, ptr, idx, ts):
     x = aggr(n_embs[dupe_idx], n_ptr, dim=0)
     return activation(gcns[layer-1](x))
 
+def recursive_temporal_prop_use_csr(layer, batch, batch_ts, g):
+    '''
+    Given an edge index in csr format (idx[ptr[0] : ptr[1]] == N(0))
+    and timestamp list of same, generate a time constrained embedding
+    of every node in batch s.t. only edges < node_t carry messages to that node
+    '''
+    if layer == 0: 
+        return g.x[batch]
+    
+    # Get potential neigbors plus self {N_{t'<t}(v_t) U v_t}
+    # TODO make this more efficient
+    n_ptr = []
+    n_batch = []
+    n_ts = []
+
+    for i in range(batch.size(0)):
+        b = batch[i]
+        t = batch_ts[i]
+
+        neighbors, n_times, _ = g.csr_ei[b]
+        n_mask = n_times <= t
+        
+        temporal_neighbors = neighbors[n_mask]
+
+        n_batch.append(temporal_neighbors)
+        n_ts.append(n_times[n_mask])
+        n_ptr += [i] * temporal_neighbors.size(0)
+
+    # Add self loops 
+    n_ptr += list(range(batch.size(0)))
+    n_batch.append(batch)
+    n_ts.append(g.node_ts[batch])
+
+    # Cat everything together
+    n_ptr = torch.tensor(n_ptr)
+    n_batch = torch.cat(n_batch, dim=0)
+    n_ts = torch.cat(n_ts, dim=0)
+
+    # Remove duplicate node,ts tuples
+    (n_batch,n_ts), dupe_idx = torch.stack(
+        [n_batch, n_ts]
+    ).unique(dim=1, return_inverse=True)
+
+    # Get neighbors' embeddings
+    n_embs = recursive_temporal_prop_use_csr(
+        layer-1, n_batch, n_ts, g
+    )
+
+    # Aggregate
+    x = aggr(n_embs[dupe_idx], n_ptr, dim=0)
+    return activation(gcns[layer-1](x))
 
 
 if __name__ == '__main__':
@@ -131,20 +184,11 @@ if __name__ == '__main__':
         [0,1,0], # 4
     ]).float()
     
-    idx = torch.tensor([3,0,0,0])
-    
-    # Need to find way to do this programatically. Times broken into 
-    # count of when src node goes to dst. (Happens once at ei[:,2])
-    ts  = torch.tensor([1,0,0,1]) 
-    ptr = torch.tensor([0,1,2,3,3,4])
-    
-    x = recursive_temporal_prop_no_repeats(
-        2, torch.arange(5), 
-        torch.tensor([1,0,0,1,1]), 
-        x, ptr, idx, ts
-    )
-    print(x)
+    edge_idx = torch.tensor([[0,0,3,0],[1,2,0,4]])
+    g = build_data_obj(edge_idx, x=x)
+    x = recursive_temporal_prop_use_csr(2, torch.arange(5, dtype=torch.long), g.node_ts, g)
 
+    print(x)
     '''
     Output: 
     tensor([[0.4886],
