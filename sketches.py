@@ -163,6 +163,9 @@ def recursive_temporal_prop_use_csr(layer, batch, batch_ts, g):
     )
 
     # Aggregate
+    # TODO I feel like there's a more efficient way to do this
+    # scatter. Like indexing n_embs and then reindexing into the 
+    # n_ptr seems like it could be consolidated, but I'm not sure
     x = aggr(n_embs[dupe_idx], n_ptr, dim=0)
     return activation(gcns[layer-1](x))
 

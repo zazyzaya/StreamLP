@@ -122,19 +122,25 @@ def to_weighted_ei(edge_index):
     ei,ew = ei.unique_consecutive(dim=1, return_counts=True)
     return ei, ew
 
-def build_data_obj(ei, x=None):
+def build_data_obj(ei, lp_test_data=0.75, x=None):
     ei, ew = to_weighted_ei(ei) 
-    ts = get_compressed_edge_ts(ei)
-    node_ts = get_node_ts(ei, ts)
+
+    te_edges = int(ei.size(1)*lp_test_data)
+    tr,te = ei[:,:te_edges], ei[:,te_edges:]
+
+    ts = get_compressed_edge_ts(tr)
+    node_ts = get_node_ts(tr, ts)
 
     if x is None: 
         x = torch.eye(ei.max()+1)
 
-    csr =  CSRData(ei, ts, ew)
+    csr =  CSRData(tr, ts, ew)
     data = Data(
         x,
         csr_ei=csr,
-        node_ts=node_ts
+        node_ts=node_ts,
+        tr_edge_index=tr, 
+        te_edge_index=te
     )    
     return data  
 
@@ -158,7 +164,10 @@ def load_ctdne(name, force=False):
     fname, sep = CTDNE_FNAMES[name]
     fname = home+fname
     f = open(fname, 'r')
+    
     line = f.readline()
+    while line.startswith('%'):
+        line = f.readline()
 
     tokens = line.split(sep)
     has_e_feats = len(tokens) == 4
@@ -166,7 +175,7 @@ def load_ctdne(name, force=False):
     src,dst,ts = [],[],[]
     while(line):
         tokens = line.split(sep) 
-        (s,d),t = tokens[0:2], tokens[-1]
+        (s,d),t = tokens[0:2], tokens[-1].strip()
         
         # For now just skip negative edges? Only applies to wiki really 
         if has_e_feats and tokens[2] == '-1':
@@ -175,20 +184,25 @@ def load_ctdne(name, force=False):
 
         src.append(int(s))
         dst.append(int(d))
-        ts.append(int(t))
+        ts.append(float(t))
 
         line = f.readline() 
     
+    f.close()
     ei = torch.tensor([src,dst])
-    ts = torch.tensor(ts)
+    ts = torch.tensor(ts, dtype=torch.long)
 
     # Pretty sure order is guaranteed, but to be safe
     order = ts.sort().indices
     ei = ei[:, order]
-
     g = build_data_obj(ei)
+
     torch.save(g, out_f)
     return g 
 
 if __name__ == '__main__':
-    load_ctdne('enron')
+    [
+        load_ctdne(name, force=True) 
+        for name in CTDNE_FNAMES.keys()
+    ]
+    

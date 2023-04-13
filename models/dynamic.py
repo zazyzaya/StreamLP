@@ -24,15 +24,21 @@ def sequential_prop(x, edge_index, state_changes, cur_x=None):
         scatter(x[ei[0]], ei[1], dim=0, out=cur_x)
         return cur_x
     
-
 class FlowGNN(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, layers=2, act=nn.ReLU, aggr='mean'):
         super().__init__()
+
+        def gcn_constructor(in_d, out_d):
+            return nn.Sequential(
+                nn.Linear(in_d, out_d),
+                nn.BatchNorm1d(out_d)
+            )
         self.gcns = nn.ModuleList(
-            [nn.Linear(in_dim, hidden_dim)] + 
-            [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers-2)] +
-            [nn.Linear(hidden_dim, out_dim)]
+            [gcn_constructor(in_dim, hidden_dim)] + 
+            [gcn_constructor(hidden_dim, hidden_dim) for _ in range(layers-2)] +
+            [gcn_constructor(hidden_dim, out_dim)]
         )
+        self.n_layers = layers
 
         self.activation = act()
         self.aggr = {
@@ -40,14 +46,25 @@ class FlowGNN(nn.Module):
             'sum': scatter 
         }[aggr]
 
-    def recursive_temporal_prop(self, layer, batch, times, x, ptr, idx, ts):
+    def forward(self, g, batch=None):
+        if batch is None:
+            batch = torch.arange(g.x.size(0))
+        
+        return self.recursive_temporal_prop(
+            self.n_layers, 
+            batch,
+            g.node_ts[batch],
+            g 
+        )
+
+    def recursive_temporal_prop(self, layer, batch, batch_ts, g):
         '''
         Given an edge index in csr format (idx[ptr[0] : ptr[1]] == N(0))
         and timestamp list of same, generate a time constrained embedding
         of every node in batch s.t. only edges < node_t carry messages to that node
         '''
         if layer == 0: 
-            return x[batch]
+            return g.x[batch]
         
         # Get potential neigbors plus self {N_{t'<t}(v_t) U v_t}
         # TODO make this more efficient
@@ -57,11 +74,10 @@ class FlowGNN(nn.Module):
 
         for i in range(batch.size(0)):
             b = batch[i]
-            t = times[i]
+            t = batch_ts[i]
 
-            neighbors = idx[ptr[b]:ptr[b+1]]
-            n_times = ts[ptr[b]:ptr[b+1]]
-            n_mask = n_times <= times[i]
+            neighbors, n_times, _ = g.csr_ei[b]
+            n_mask = n_times <= t
             
             temporal_neighbors = neighbors[n_mask]
 
@@ -72,59 +88,95 @@ class FlowGNN(nn.Module):
         # Add self loops 
         n_ptr += list(range(batch.size(0)))
         n_batch.append(batch)
-        n_ts.append(times)
+        n_ts.append(g.node_ts[batch])
 
         # Cat everything together
         n_ptr = torch.tensor(n_ptr)
         n_batch = torch.cat(n_batch, dim=0)
         n_ts = torch.cat(n_ts, dim=0)
 
+        # Remove duplicate node,ts tuples
+        (n_batch,n_ts), dupe_idx = torch.stack(
+            [n_batch, n_ts]
+        ).unique(dim=1, return_inverse=True)
+
         # Get neighbors' embeddings
         n_embs = self.recursive_temporal_prop(
-            layer-1, n_batch, n_ts, x, ptr, idx, ts
+            layer-1, n_batch, n_ts, g
         )
 
         # Aggregate
-        x = self.aggr(n_embs, n_ptr, dim=0)
+        # TODO I feel like there's a more efficient way to do this
+        # scatter. Like indexing n_embs and then reindexing into the 
+        # n_ptr seems like it could be consolidated, but I'm not sure
+        x = self.aggr(n_embs[dupe_idx], n_ptr, dim=0)
         return self.activation(self.gcns[layer-1](x))
-    
-if __name__ == '__main__':
-    # edge_index: [
-    #   [0,0,3,0],
-    #   [1,2,0,4]
-    # ]
-    # 0 ->1  3->0->4
-    #   \-->2
-    # we expect f(1) == f(2) != f(4) as it has been touched by 
-    # v_0 after it has been "poisoned" by v_3 
-    x   = torch.tensor([
-        [1,0,0], # 0 
-        [0,1,0], # 1
-        [0,1,0], # 2
-        [0,0,1], # 3
-        [0,1,0], # 4
-    ]).float()
-    
-    idx = torch.tensor([3,0,0,0])
-    ts  = torch.tensor([2,0,1,4])
-    ptr = torch.tensor([0,1,2,3,3,4])
-    
-    gnn = FlowGNN(3, 16, 1, act=nn.Sigmoid)
-    x = gnn.recursive_temporal_prop(
-        2, torch.arange(5), 
-        torch.tensor([3,0,1,4,4]), 
-        x, ptr, idx, ts
-    )
-    print(x)
 
-    '''
-    Output: 
-    tensor([[0.4886],
-            [0.4903],
-            [0.4903],
-            [0.4858],
-            [0.4877]], grad_fn=<SigmoidBackward0>)
+
+class L2Decoder(nn.Module):
+    def forward(self, x1, x2):
+        return (x1-x2).pow(2).sum(dim=1, keepdim=True)
+
+class Dot(nn.Module):
+    def forward(self, x1, x2):
+        return (x1 * x2).sum(dim=1, keepdim=True)
+
+class HadNet(nn.Module):
+    def __init__(self, dim):
+        self.net = nn.Linear(dim, 1)
+    def forward(self, x1, x2):
+        return self.net(x1 * x2)
+
+class DeepHadNet(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim,dim),
+            nn.Linear(dim, 1)
+        )
     
-    So we find f(1) == f(2) != f(4)
-    Confirmation that this works. 
-    '''
+    def forward(self, x1, x2):
+        return self.net(x1 * x2)
+
+class FlowGNN_LP(FlowGNN):
+    def __init__(self, in_dim, hidden_dim, out_dim, layers=2, dec='hadnet', act=nn.ReLU, aggr='mean'):
+        super().__init__(in_dim, hidden_dim, out_dim, layers, act, aggr)
+
+        self.decode_net = {
+            'l2': L2Decoder(),
+            'dot': Dot(),
+            'hadnet': HadNet(out_dim),
+            'deephad': DeepHadNet(out_dim)
+        }[dec]
+        self.loss_fn = nn.BCEWithLogitsLoss()
+
+
+    def forward(self, g, target, batch=None):
+        batch, target = target.unique(return_inverse=True)
+        embs = super().forward(g, batch)
+
+        src,dst = target
+        n_src,n_dst = torch.randint(0, target.max(), (2, target.size(1)))
+
+        pos = self.predict(embs, src, dst, activation=False)
+        neg = self.predict(embs, n_src, n_dst, activation=False)
+        
+        preds = torch.cat([pos,neg], dim=0)
+        target = torch.zeros(preds.size())
+        target[:pos.size(0)] = 1. 
+
+        return self.loss_fn(preds, target)
+
+
+    def predict(self, embs, src, dst, activation=True):
+        pred = self.decode_net(embs[src], embs[dst])
+        
+        if activation:
+            return torch.sigmoid(pred)
+        else:
+            return pred 
+        
+
+    def lp(self, g, target):
+        embs = super().forward(g, torch.arange(target.max()+1))
+        return self.predict(embs, target[0], target[1])
