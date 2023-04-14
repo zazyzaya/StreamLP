@@ -8,7 +8,7 @@ from sklearn.metrics import roc_auc_score as auc_score
 import torch 
 from torch.optim import Adam
 
-from build_data import load_ctdne, CTDNE_FNAMES
+from contagion.build_ctdne_data import load_ctdne, CTDNE_FNAMES
 from models.dynamic import FlowGNN_LP
 
 torch.set_num_threads(8)

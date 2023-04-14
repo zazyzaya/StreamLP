@@ -150,8 +150,8 @@ class GraphMixer_LP(nn.Module):
         batch, target = target.unique(return_inverse=True)
         
         if presampled is None:
-            node_feats, edge_feats, edge_ts, nid, idx = sample(
-                graph, batch, t, self.edge_emb.K
+            node_feats, edge_feats, edge_ts, nid, idx = graph.sample(
+                batch, t, self.edge_emb.K
             )
         else:
             node_feats, edge_feats, edge_ts, nid, idx = presampled
@@ -184,18 +184,3 @@ class GraphMixer_LP(nn.Module):
         loss = self.loss_fn(labels, preds)
 
         return loss 
-
-# TODO 
-def sample(graph, nodes, t, K):
-    '''
-        samples graph pull find node/edge feats out of csr matrix
-        given a timestamp that they must all come before
-
-        returns: 
-            node_feats
-            edge_feats
-            edge_ts
-            nid - unique id associated with edge feature from [0,|nodes|) 
-            idx - unique id from [0, K) 
-    '''
-    return [None]

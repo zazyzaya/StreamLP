@@ -2,7 +2,7 @@ import torch
 from torch import nn 
 from torch_scatter import scatter_mean, scatter
 
-from build_data import build_data_obj
+from contagion.build_ctdne_data import build_data_obj
 
 '''
 Sketching out ideas to try to improve temporal prop

@@ -7,7 +7,7 @@ from torch_geometric.data import Data
 class CSRData():
     def __init__(self, ei, et, ew):
         self.ptr, self.index, self.time, self.weight = self.to_csr(ei,et,ew)
-        
+
     def to_csr(self, ei, et, ew):
         get_empty = lambda : {'ei':[], 'ts': [], 'ew':[]}
         neighbors = defaultdict(get_empty)
@@ -155,7 +155,7 @@ CTDNE_FNAMES = {
 }
 
 def load_ctdne(name, force=False):
-    home = 'ctdne-datasets/'
+    home = '../ctdne-datasets/'
     out_f = home + f'precalculated/{name}.pt'
 
     if os.path.exists(out_f) and not force:
@@ -205,4 +205,3 @@ if __name__ == '__main__':
         load_ctdne(name, force=True) 
         for name in CTDNE_FNAMES.keys()
     ]
-    
