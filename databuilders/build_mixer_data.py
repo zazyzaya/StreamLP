@@ -1,6 +1,7 @@
 from collections import defaultdict
 import os 
 import pickle
+import socket 
 
 from joblib import Parallel, delayed
 import torch 
@@ -9,6 +10,9 @@ from torch_geometric.nn import MessagePassing
 from tqdm import tqdm 
 
 HOME = os.path.dirname(__file__) + '/../mixer-datasets/'
+
+if socket.gethostname() == 'orion.ece.seas.gwu.edu':
+    HOME = '/mnt/raid0_ssd_8tb/isaiah/mixer-datasets/'
 
 class MixerCSR():
     def __init__(self, ei, ts, feats, ys, va,te, name, node_feats=None):
@@ -22,6 +26,11 @@ class MixerCSR():
         self.name = name 
         self.num_nodes = self.ptr.size(0)-1
         self.node_feats = torch.zeros(self.num_nodes, 1)
+
+    def to(self, device):
+        self.time = self.time.to(device)
+        self.efeats = self.efeats.to(device)
+        self.node_feats = self.node_feats.to(device)
 
     def to_csr(self, ei, ts, feats, ys):
         get_empty = lambda : {
@@ -85,6 +94,7 @@ class MixerCSR():
         return self.time[st:en].unsqueeze(-1), self.efeats[st:en] 
 
     def sample_one(self, nid, t, k):
+        # Edge features
         ts, feats = self.get_edge_feats(nid)
         earlier = (ts < t).squeeze(-1)
 
@@ -105,11 +115,10 @@ class MixerCSR():
             # Concat samples, and return pointers to where each 
             # datapoint belongs (kind of like sparse-packing an RNN)
             return \
-                self.node_feats[nids], \
                 *self.compress(samples), \
                 *self.index_sample(samples)
         
-        return self.node_feats[nids], samples 
+        return samples 
     
     def subsample(self, idx,feats,samples):
         subset = [samples[i] for i in idx]
@@ -134,15 +143,6 @@ class MixerCSR():
             idx += list(range(samp_size))
 
         return torch.tensor(nid), torch.tensor(idx)
-    
-    def load_train_feats(self):
-        self.node_feats = torch.load(
-            self.name.replace('_csr', '_x')
-        )['tr']
-    def load_test_feats(self):
-        self.node_feats = torch.load(
-            self.name.replace('_csr', '_x')
-        )['te']
 
 
 def build_from_csv(name, tr_ratio=0.7):
