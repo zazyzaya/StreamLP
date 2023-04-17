@@ -5,22 +5,23 @@ import pickle
 from joblib import Parallel, delayed
 import torch 
 from torch_geometric.data import Data 
+from torch_geometric.nn import MessagePassing
 from tqdm import tqdm 
 
-HOME = '../mixer-datasets/'
+HOME = os.path.dirname(__file__) + '/../mixer-datasets/'
 
 class MixerCSR():
-    def __init__(self, ei, ts, feats, ys, va,te, node_feats=None):
-        self.va = va; self.te = te 
+    def __init__(self, ei, ts, feats, ys, va,te, name, node_feats=None):
+        self.end_tr = self.start_va = va 
+        self.end_va = self.start_te = te 
 
         self.ptr, self.index, \
         self.time, self.efeats, \
         self.dyn_y = self.to_csr(ei,ts,feats,ys)
 
+        self.name = name 
         self.num_nodes = self.ptr.size(0)-1
-        self.node_feats = \
-            node_feats if node_feats is not None \
-            else torch.eye(self.num_nodes)
+        self.node_feats = torch.zeros(self.num_nodes, 1)
 
     def to_csr(self, ei, ts, feats, ys):
         get_empty = lambda : {
@@ -91,7 +92,7 @@ class MixerCSR():
         # before time t 
         return ts[earlier][-k:], feats[earlier][-k:]
     
-    def sample(self, nids, t, k=20, compressed=False):
+    def sample(self, nids, t, k=20, compressed=True):
         # Somehow, using threads/procs only slows this down
         # communication is slow enough that it's worth it to
         # just do this all at once I guess
@@ -110,6 +111,13 @@ class MixerCSR():
         
         return self.node_feats[nids], samples 
     
+    def subsample(self, idx,feats,samples):
+        subset = [samples[i] for i in idx]
+        
+        return feats[idx], \
+            *self.compress(subset), \
+            *self.index_sample(subset)
+
     def compress(self, samples):
         ts,feat = zip(*samples)
         ts = torch.cat(ts, dim=0)
@@ -125,7 +133,16 @@ class MixerCSR():
             nid += [i]*samp_size
             idx += list(range(samp_size))
 
-        return nid,idx
+        return torch.tensor(nid), torch.tensor(idx)
+    
+    def load_train_feats(self):
+        self.node_feats = torch.load(
+            self.name.replace('_csr', '_x')
+        )['tr']
+    def load_test_feats(self):
+        self.node_feats = torch.load(
+            self.name.replace('_csr', '_x')
+        )['te']
 
 
 def build_from_csv(name, tr_ratio=0.7):
@@ -209,8 +226,9 @@ def build_from_csv(name, tr_ratio=0.7):
             return get_feat_job(f)
     
     # I think stripping features takes long enough that it's probably worth it to 
-    # just delegate it to its own thread
-    (ei,ts,ys),feats = Parallel(2, prefer='processes', batch_size=2)(
+    # just delegate it to its own thread (saves like 2 seconds.. eh)
+    #                                       This comment shuts up PyLance --v
+    (ei,ts,ys),feats = Parallel(2, prefer='processes', batch_size=2)( # type: ignore
         delayed(delegate)(i) for i in range(2)
     )
 
@@ -221,16 +239,27 @@ def build_from_csv(name, tr_ratio=0.7):
     va = ts[va]
     te = ts[te]
 
+    # Node features are a one-hop mean aggr of neighbors. But ensure
+    # edges from future timesteps do not contribute to node reprs 
+    mp = MessagePassing(aggr='mean')
+    tr_x = mp.propagate(ei[:,ts<va], x=torch.eye(ei.max()+1))
+    te_x = mp.propagate(ei[:,ts<te], x=torch.eye(ei.max()+1))
+
+    out_csr = HOME+f'precalculated/{name}_csr.pt'
     csr = MixerCSR(
         ei, ts, feats, 
-        ys, va, te
+        ys, va, te, 
+        os.path.abspath(out_csr)
     )
+
     out_csr = HOME+f'precalculated/{name}_csr.pt'
-    
     with open(out_csr, 'wb') as f:
         pickle.dump(csr, f)
 
-    return csr 
+    torch.save({'ei': ei, 'ts': ts}, HOME+f'precalculated/{name}_ei.pt')
+    torch.save({'tr': tr_x, 'te': te_x}, HOME+f'precalculated/{name}_x.pt')
+    
+    return csr, ei, ts
 
 def get_dataset(name):
     out_csr = HOME+f'precalculated/{name}_csr.pt'
@@ -238,10 +267,13 @@ def get_dataset(name):
     # Better to do this from here or pickle gets mad
     if os.path.exists(out_csr):
         with open(out_csr, 'rb') as f:
-            return pickle.load(f)
+            csr = pickle.load(f)
+        et = torch.load(out_csr.replace('_csr', '_ei'))
+
+        return csr, et['ei'], et['ts']
         
     return build_from_csv(name)
 
 if __name__ == '__main__':
-    build_from_csv('reddit')
     build_from_csv('wikipedia')
+    build_from_csv('reddit')

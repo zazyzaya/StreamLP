@@ -73,7 +73,7 @@ class MLPMixer(nn.Module):
         Expects B x K x d input where K is fixed length list of 
         d-dimensional edge features 
         '''
-        x = x + self.col_nn(x.transpose(0,2,1)).transpose(0,2,1)
+        x = x + self.col_nn(x.permute(0,2,1)).permute(0,2,1)
         x = x + self.row_nn(x)
         return x 
     
@@ -84,7 +84,7 @@ class EdgeFeatEncoder(nn.Module):
         self.ts = TimeEncode(time_feats)
         self.lin = nn.Linear(edge_feats + time_feats, out_dim)
 
-    def forward(self, ef, et):
+    def forward(self, et, ef):
         et = self.ts(et)
         feats = torch.cat([ef, et], dim=-1)
         return self.lin(feats)
@@ -108,14 +108,14 @@ class GraphMixer(nn.Module):
         self.out = out_dim
 
     
-    def forward(self, ef, et, nid, idx):
+    def forward(self, et, ef, nid, idx):
         '''
         Given a list of E edges, labeled by node id (assumed unique 0-N)
         and their position in the list of edges for that node (0-K) do forward
         pass of edge features through mlp-mixer
         '''
         # E x d
-        x = self.edge_feats(ef, et)
+        x = self.edge_feats(et, ef)
         
         split = torch.zeros(self.K * (nid.max()+1), x.size(1))
         positions = nid*self.K + idx
@@ -142,31 +142,31 @@ class GraphMixer_LP(nn.Module):
         self.edge_emb = GraphMixer(edge_feats, **mixer_kwargs)
         self.src_mlp = nn.Linear(node_feats + self.edge_emb.out, lp_hidden)
         self.dst_mlp = nn.Linear(node_feats + self.edge_emb.out, lp_hidden)
-        self.proj_out = nn.Linear(lp_hidden, 1)
+        self.proj_out = nn.Linear(lp_hidden*2, 1)
 
-        self.loss_fn = nn.BCELoss()
+        self.loss_fn = nn.BCEWithLogitsLoss()
 
     def embed(self, graph, target, t, presampled=None):
         batch, target = target.unique(return_inverse=True)
         
         if presampled is None:
-            node_feats, edge_feats, edge_ts, nid, idx = graph.sample(
+            node_feats, edge_ts, edge_feats, nid, idx = graph.sample(
                 batch, t, self.edge_emb.K
             )
         else:
-            node_feats, edge_feats, edge_ts, nid, idx = presampled
+            node_feats, edge_ts, edge_feats, nid, idx = presampled
 
         return torch.cat([
-            self.edge_emb(edge_feats, edge_ts, nid, idx),
+            self.edge_emb(edge_ts, edge_feats, nid, idx),
             node_feats
         ], dim=1), target 
 
     def lp(self, src, dst, zs):
         src = self.src_mlp(zs[src])
         dst = self.dst_mlp(zs[dst])
-        return self.proj_out(src+dst)
+        return self.proj_out(torch.cat([src,dst], dim=1))
         
-    def forward(self, graph, target, t, presampled=None):
+    def forward(self, graph, target, t, presampled=None, pred=False):
         zs, target = self.embed(graph, target, t, presampled=presampled)
         
         n_edges = target.size(1)
@@ -179,8 +179,12 @@ class GraphMixer_LP(nn.Module):
         neg = self.lp(n_target[0], n_target[1], zs)
         preds = torch.cat([pos,neg], dim=0)
 
-        labels = torch.zeros(pos.size(1)*2)
-        labels[:pos.size(1)] = 1
-        loss = self.loss_fn(labels, preds)
+        labels = torch.zeros(pos.size(0)*2,1)
+        labels[:pos.size(0)] = 1
+
+        if pred:
+            return preds, labels
+
+        loss = self.loss_fn(preds, labels)
 
         return loss 
