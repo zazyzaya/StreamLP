@@ -25,9 +25,6 @@ k_map = {
     'gdelt': 30
 }
 
-def sample_node_feats(ei, ts, t0, st, en):
-    pass # TODO 
-
 def train(hp, model, csr, ei, ts):
     tr_ei = ei[:, ts<csr.end_tr]
 
@@ -41,19 +38,20 @@ def train(hp, model, csr, ei, ts):
     for e in range(hp.epochs):
         model.train()
 
-        for b in tqdm(range(1,n_batches)):
+        perm = torch.randperm(n_batches-1) + 1
+        for b in tqdm(range(perm.size(0))):
+            b = perm[b]
+
             st = b*hp.batch_size 
             en = st+hp.batch_size 
             target = tr_ei[:, st:en]
-            t = ts[st]
+            t0 = ts[st]
+            T = t0 - ts[max(0, st-hp.T)]
             
             opt.zero_grad()
-            last_T = ei[:, max(0,st-hp.T):st].to(DEVICE)
-            loss = model(csr, target, t, last_T)
+            loss = model(csr, target, t0, T)
             loss.backward()
             opt.step()
-
-            del last_T
 
         print(f"[{e}] {loss.item():.4f}")
         tr_ap, val_ap = validate(model, csr, ei, ts)
@@ -77,9 +75,14 @@ def train(hp, model, csr, ei, ts):
 @torch.no_grad()
 def validate(model, csr, ei, ts):
     model.eval()
-    tr_ei = ei[:, (ts < csr.end_tr)]
-    last_T = tr_ei[:, -2000:].to(DEVICE)
-    preds, targets = model(csr, tr_ei, csr.end_tr, last_T, pred=True)
+    tr_mask = (ts < csr.end_tr)
+    tr_ei = ei[:, tr_mask]
+    t0 = csr.end_tr 
+
+    tr_ts = ts[tr_mask]
+    T = t0 - tr_ts[max(tr_ts.size(0)-2000, 0)]
+
+    preds, targets = model(csr, tr_ei, csr.start_va, T, pred=True)
 
     preds = preds.cpu()
     targets = targets.cpu()
@@ -87,7 +90,7 @@ def validate(model, csr, ei, ts):
     print("\tTr  AP: ", tr_ap)
 
     va_ei = ei[:, (ts < csr.end_va).logical_and(ts > csr.end_tr)]
-    preds, targets = model(csr, va_ei, csr.end_tr, last_T, pred=True)
+    preds, targets = model(csr, va_ei, csr.end_va, T, pred=True)
 
     preds = preds.cpu()
     targets = targets.cpu()
@@ -98,9 +101,11 @@ def validate(model, csr, ei, ts):
 @torch.no_grad()
 def test(model, csr, ei, ts):
     model.eval()
-    te_ei = ei[:, (ts > csr.start_te)]
-    start_T = ei[:, (ts < csr.start_te)][:, -2000:].to(DEVICE)
-    preds, targets = model(csr, te_ei, csr.end_va, start_T, pred=True)
+    te_mask = ts < csr.end_va
+    te_ei = ei[:, te_mask]
+    t0 = csr.end_va
+    T = t0 - ts[~te_mask][-2000]
+    preds, targets = model(csr, te_ei, t0, T, pred=True)
 
     preds = preds.cpu()
     targets = targets.cpu()
@@ -129,7 +134,7 @@ def main(dataset, i):
     stats, best = train(HYPERPARAMS, model, csr, ei, ts)
     torch.save(
         dict(stats=stats, best=best), 
-        f'results/mixer/{dataset}_i.pt'
+        f'results/mixer/{dataset}_{i}.pt'
     )
 
 [main('wikipedia', i) for i in range(5)]

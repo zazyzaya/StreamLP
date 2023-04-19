@@ -7,6 +7,7 @@ from joblib import Parallel, delayed
 import torch 
 from torch_geometric.data import Data 
 from torch_geometric.nn import MessagePassing
+from torch_scatter import scatter_mean
 from tqdm import tqdm 
 
 HOME = os.path.dirname(__file__) + '/../mixer-datasets/'
@@ -28,6 +29,7 @@ class MixerCSR():
         self.node_feats = torch.zeros(self.num_nodes, 1)
 
     def to(self, device):
+        self.index = self.index.to(device)
         self.time = self.time.to(device)
         self.efeats = self.efeats.to(device)
         self.node_feats = self.node_feats.to(device)
@@ -93,39 +95,33 @@ class MixerCSR():
         st, en = self.ptr[nid], self.ptr[nid+1]
         return self.time[st:en].unsqueeze(-1), self.efeats[st:en] 
 
-    def sample_one(self, nid, t, k):
+    def sample_one(self, nid, t0, k):
         # Edge features
         ts, feats = self.get_edge_feats(nid)
-        earlier = (ts < t).squeeze(-1)
+        earlier = (ts < t0).squeeze(-1)
 
         # Returns most recent k edge features that occured 
         # before time t 
         return ts[earlier][-k:], feats[earlier][-k:]
     
-    def sample(self, nids, t, k=20, compressed=True):
+    def sample(self, nids, t0, T, k=20, compressed=True):
         # Somehow, using threads/procs only slows this down
         # communication is slow enough that it's worth it to
         # just do this all at once I guess
         samples = [
-            self.sample_one(nid, t, k)
+            self.sample_one(nid, t0, k)
             for nid in nids
         ]
+        x = self.sample_temporal_neighbors(nids, t0, T)
 
         if compressed:
             # Concat samples, and return pointers to where each 
             # datapoint belongs (kind of like sparse-packing an RNN)
-            return \
+            return x, \
                 *self.compress(samples), \
                 *self.index_sample(samples)
         
-        return samples 
-    
-    def subsample(self, idx,feats,samples):
-        subset = [samples[i] for i in idx]
-        
-        return feats[idx], \
-            *self.compress(subset), \
-            *self.index_sample(subset)
+        return x, samples
 
     def compress(self, samples):
         ts,feat = zip(*samples)
@@ -143,6 +139,65 @@ class MixerCSR():
             idx += list(range(samp_size))
 
         return torch.tensor(nid), torch.tensor(idx)
+
+    def __sample_one_temporal(self, nid, i, t0, T):
+        st, en = self.ptr[nid], self.ptr[nid+1]
+        t = self.time[st:en]
+        n = self.index[st:en]
+        
+        def empty():
+            return \
+                torch.tensor(
+                    [], dtype=torch.long, 
+                    device=self.node_feats.device
+                ), \
+                torch.tensor(
+                    [], dtype=torch.long, 
+                    device=self.node_feats.device
+                )
+
+        prev_mask = t < t0
+        if prev_mask.sum() == 0:
+            return empty()
+        
+        highest = t[prev_mask].max()
+        mask = prev_mask.logical_and(t > highest-T)
+        if mask.sum() == 0:
+            return empty()
+
+        neighbors = n[mask]
+        return \
+            neighbors, \
+            torch.full(
+                (neighbors.size(0),), 
+                i, dtype=torch.long, 
+                device=self.node_feats.device
+            ) 
+
+    def sample_temporal_neighbors(self, batch, t0, T, threads=8):
+        # Again, surprisingly threading does not speed this up:
+        '''
+        Whole wiki graph: 
+            1 0.7723490715026855
+            2 1.2819236516952515
+            4 1.2830888271331786
+            8 1.3902598857879638
+            16 1.3183327198028565
+        '''
+        scatter_src, scatter_dst = [],[]
+        for uuid,nid in enumerate(batch):
+            s,d = self.__sample_one_temporal(nid, uuid, t0, T) 
+            scatter_src.append(s)
+            scatter_dst.append(d)
+            
+        scatter_src = torch.cat(scatter_src)
+        scatter_dst = torch.cat(scatter_dst)
+
+        return scatter_mean(
+            self.node_feats[scatter_src], 
+            scatter_dst, dim=0, 
+            dim_size=batch.size(0)
+        )
 
 
 def build_from_csv(name, tr_ratio=0.7):

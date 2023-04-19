@@ -153,20 +153,21 @@ class GraphMixer_LP(nn.Module):
         self.device = device 
         self.mp = MessagePassing(aggr='mean')
 
-    def embed(self, graph, target, t, node_x):
+    def embed(self, graph, target, t0, T):
         neg = torch.randint(0, graph.num_nodes, target.size())
         num_neg = neg.size(1)
 
         target = torch.cat([target, neg], dim=1)
         batch, target = target.unique(return_inverse=True)
 
-        edge_ts, edge_feats, nid, idx = graph.sample(
-            batch, t, self.edge_emb.K
+        node_x, edge_ts, edge_feats, nid, idx = graph.sample(
+            batch, t0, self.edge_emb.K
         )
+        edge_x = self.edge_emb(edge_ts, edge_feats, nid, idx, batch.size(0))
 
         return torch.cat([
-            self.edge_emb(edge_ts, edge_feats, nid, idx, batch.size(0)),
-            node_x[batch]
+            edge_x,
+            node_x
         ], dim=1), target, num_neg
 
     def lp(self, src, dst, zs):
@@ -174,13 +175,8 @@ class GraphMixer_LP(nn.Module):
         dst = self.dst_mlp(zs[dst])
         return self.proj_out(torch.cat([src,dst], dim=1))
         
-    def forward(self, graph, target, t, last_T, pred=False):
-        node_x = self.mp.propagate(
-            last_T, size=(graph.num_nodes,self.node_feats), 
-            x=graph.node_feats
-        )
-        
-        zs, target, num_neg = self.embed(graph, target, t, node_x)
+    def forward(self, graph, target, t0, T, pred=False):
+        zs, target, num_neg = self.embed(graph, target, t0, T)
         target, n_target = target[:,:-num_neg], target[:,-num_neg:]
 
         pos = self.lp(target[0], target[1], zs)
