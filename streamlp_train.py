@@ -7,13 +7,15 @@ import numpy as np
 from sklearn.metrics import roc_auc_score as auc_score
 import torch 
 from torch.optim import Adam
+from torch_geometric.data import Data
 
-from contagion.build_ctdne_data import load_ctdne, CTDNE_FNAMES
+from databuilders.build_ctdne_data import load_ctdne, CTDNE_FNAMES
+from databuilders.build_mixer_data import get_dataset, MixerCSR
 from models.dynamic import FlowGNN_LP
 
 torch.set_num_threads(8)
 HYPERPARAMS = SimpleNamespace(
-    hidden=64, out=32, layers=3, decoder='deephad',
+    hidden=256, out=100, layers=3, decoder='deephad',
     lr=0.01, epochs=200, batch_size=64
 )
 
@@ -57,8 +59,16 @@ def test(model, data, verbose=True):
     return auc
 
 
-def main(hp, dataset, trials=5):
-    data = load_ctdne(dataset, force=True)
+def main(hp, dataset, loader, trials=5):
+    data = loader(dataset, force=True)
+
+    if loader == get_dataset:
+        csr, ei, ts = data 
+        data = Data(
+            x = csr.node_feats, 
+            edge_index = ei, 
+            csr_ei = csr 
+        )
 
     stats = []
     for _ in range(trials):
@@ -95,5 +105,5 @@ if __name__ == '__main__':
             hp.decoder = dec 
             hp.layers = layers 
 
-            for data in CTDNE_FNAMES.keys():
-                main(hp, data)
+            for data in ['wikipedia', 'reddit']:
+                main(hp, data, get_dataset)

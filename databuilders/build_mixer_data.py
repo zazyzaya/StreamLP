@@ -316,11 +316,11 @@ def build_from_csv(name, tr_ratio=0.7):
     
     return csr, ei, ts
 
-def get_dataset(name):
+def get_dataset(name, force=False):
     out_csr = HOME+f'precalculated/{name}_csr.pt'
 
     # Better to do this from here or pickle gets mad
-    if os.path.exists(out_csr):
+    if os.path.exists(out_csr) and not force:
         with open(out_csr, 'rb') as f:
             csr = pickle.load(f)
         et = torch.load(out_csr.replace('_csr', '_ei'))

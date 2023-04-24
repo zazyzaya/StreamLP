@@ -1,8 +1,12 @@
 from collections import defaultdict
 import os 
 
+from joblib import Parallel, delayed
 import torch 
 from torch_geometric.data import Data
+from tqdm import tqdm 
+
+MIXER_HOME = os.path.dirname(__file__) + '/../mixer-datasets/'
 
 class CSRData():
     def __init__(self, ei, et, ew):
@@ -122,11 +126,12 @@ def to_weighted_ei(edge_index):
     ei,ew = ei.unique_consecutive(dim=1, return_counts=True)
     return ei, ew
 
-def build_data_obj(ei, lp_test_data=0.75, x=None):
+def build_data_obj(ei, lp_test_data=0.7, x=None):
     ei, ew = to_weighted_ei(ei) 
 
-    te_edges = int(ei.size(1)*lp_test_data)
-    tr,te = ei[:,:te_edges], ei[:,te_edges:]
+    va_edges = int(ei.size(1)*lp_test_data)
+    te_edges = int(ei.size(1)*(lp_test_data + (1-lp_test_data)/2)) 
+    tr,va,te = ei[:,:va_edges], ei[:,va_edges:te_edges], ei[:, te_edges:]
 
     ts = get_compressed_edge_ts(tr)
     node_ts = get_node_ts(tr, ts)
@@ -140,6 +145,7 @@ def build_data_obj(ei, lp_test_data=0.75, x=None):
         csr_ei=csr,
         node_ts=node_ts,
         tr_edge_index=tr, 
+        va_edge_index=va,
         te_edge_index=te
     )    
     return data  
@@ -193,6 +199,93 @@ def load_ctdne(name, force=False):
     ts = torch.tensor(ts, dtype=torch.long)
 
     # Pretty sure order is guaranteed, but to be safe
+    order = ts.sort().indices
+    ei = ei[:, order]
+    g = build_data_obj(ei)
+
+    torch.save(g, out_f)
+    return g 
+
+def load_mixer(name):
+    fname = MIXER_HOME+name+'.csv'
+    out_f = MIXER_HOME + f'precalculated/{name}_stream.pt'
+
+    def get_edge_job(f):
+        src,dst,ts,ys = [],[],[],[]
+        f.readline() # Skip header 
+        line = f.readline()
+
+        prog = tqdm(desc='Edges')
+        while(line):
+            s,d,t,y,_ = line.split(',',4)
+            src.append(int(s))
+            dst.append(int(d))
+            ts.append(float(t))
+            ys.append(int(y))
+
+            prog.update()
+            line = f.readline()
+
+        src = torch.tensor(src)
+        dst = torch.tensor(dst)
+        ts = torch.tensor(ts)
+        ys = torch.tensor(ys)
+
+        # Need nodes to be unique. Since graph was 
+        # bipartite they give srcs and dsts their own
+        # set of unique labels, we're just undoing that
+        dst += src.max()+1
+        ei = torch.stack([src,dst])
+
+        # Norm so min is 0
+        ts -= ts.min()
+
+        # Only src nodes have labels. Fill w empty vals
+        # for dst nodes 
+        ys = torch.cat([
+            ys,
+            torch.full(ys.size(), -1),
+        ])
+
+        f.close()
+        prog.close()
+        return ei,ts,ys
+    
+    def get_feat_job(f):
+        feats = []
+        f.readline() # Skip header
+        line = f.readline()
+
+        prog = tqdm(desc='Features')
+        while (line):
+            # Trim off tailing \n, and skip 
+            # edge index data
+            feat = line[:-1].split(",")[4:]
+            feat = [float(f) for f in feat]
+            feats.append(feat)
+
+            line = f.readline()
+            prog.update()
+
+        f.close()
+        prog.close()
+
+        return torch.tensor(feats)
+    
+    def delegate(i):
+        f = open(fname, 'r')
+        if i == 0:
+            return get_edge_job(f)
+        else: 
+            return get_feat_job(f)
+    
+    # I think stripping features takes long enough that it's probably worth it to 
+    # just delegate it to its own thread (saves like 2 seconds.. eh)
+    #                                       This comment shuts up PyLance --v
+    (ei,ts,ys),feats = Parallel(2, prefer='processes', batch_size=2)( # type: ignore
+        delayed(delegate)(i) for i in range(2)
+    )
+
     order = ts.sort().indices
     ei = ei[:, order]
     g = build_data_obj(ei)
