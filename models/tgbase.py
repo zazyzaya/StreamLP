@@ -9,7 +9,7 @@ from torch_scatter import (
     scatter_min
 )
 
-from incrimental_h import StreamEntropy
+from .incrimental_h import StreamEntropy
 
 '''
 Implimenting TGBase temporal graph feature extractor from 
@@ -240,7 +240,7 @@ class StreamTGBaseEncoder():
         '''
         if (isinstance(idx, torch.Tensor) and idx.dim() > 0) \
             or isinstance(idx, list):
-            check = max(idx)
+            check = max(idx) # type: ignore
         else:
             check = idx 
             idx = [idx]
@@ -289,7 +289,7 @@ class StreamTGBaseEncoder():
         '''
         # If this is an unseen id 
         if idx >= self.tot.size(0):
-            return self.__add_unseen(idx, value)
+            return self.__add_unseen(idx)
 
         # Total does not change, still have n samples
         #   self.tot[idx] += 1
@@ -317,11 +317,11 @@ class StreamTGBaseEncoder():
 
     
 class StreamTGBase():
-    def __init__(self, n_feats, n_nodes=128):
+    def __init__(self, n_feats, n_nodes=128, entropy=True):
         # Edge feature aggregators
-        self.in_aggr = StreamTGBaseEncoder(n_feats, n_nodes)
-        self.out_aggr = StreamTGBaseEncoder(n_feats, n_nodes)
-        self.bi_aggr = StreamTGBaseEncoder(n_feats, n_nodes)
+        self.in_aggr = StreamTGBaseEncoder(n_feats, n_nodes, entropy=entropy)
+        self.out_aggr = StreamTGBaseEncoder(n_feats, n_nodes, entropy=entropy)
+        self.bi_aggr = StreamTGBaseEncoder(n_feats, n_nodes, entropy=entropy)
 
         # Just counts in/out/bi edges from this node
         self.local = torch.zeros(n_nodes, 3)
@@ -346,7 +346,7 @@ class StreamTGBase():
             torch.zeros(dif, self.local.size(1))
         ], dim=0)
 
-    def add_edge(self, src_dst, edge_feat):
+    def add_edge(self, src_dst, edge_feat, return_value=False):
         src,dst = src_dst 
         self.__add_if_unseen(max(src,dst))
 
@@ -361,22 +361,40 @@ class StreamTGBase():
         self.bi_aggr.add(src_dst, edge_feat)
 
         # Add edge to list
-        self.neighbors[src].add(dst)
-        self.neighbors[dst].add(src)
+        self.neighbors[src.item()].add(dst)
+        self.neighbors[dst.item()].add(src)
 
-    def calc_structural(self):
+        if return_value: 
+            return self.get(src)
+
+    def calc_structural(self, idxs=None):
+        if idxs is None:
+            idxs = list(range(self.local.size(0)))
+
+        if isinstance(idxs, torch.Tensor):
+            if idxs.dim()==0:
+                idxs = [idxs.item()]
+            else:
+                idxs = [int(i) for i in idxs]
+        elif not isinstance(idxs, Iterable):
+            idxs = [idxs]
+
         src,dst = [],[]
-        for k,v in self.neighbors.items():
-            src += [k]*len(v)
+        for i,k in enumerate(idxs):
+            v = self.neighbors[k]
+
+            # Ensure indexed from 0-len(idx) 
+            # so output mat[i] correlates to node idx[i]
+            src += [i]*len(v)
             dst += list(v) 
         
         ei = torch.tensor([src,dst])
 
-        num_nodes = self.local.size(0)
+        num_nodes = len(idxs)
         kwargs = dict(dim=0, dim_size=num_nodes)
 
-        src = self.local[ei[0]]
-        dst = ei[1].unsqueeze(-1)
+        dst = ei[0].unsqueeze(-1)
+        src = self.local[ei[1]]
         args = (src,dst)
 
         structure_cols = [
@@ -390,7 +408,7 @@ class StreamTGBase():
         # There's prob a more efficient way to do this but..
         lists = [[] for _ in range(num_nodes)]
         for j in range(ei.size(1)):
-            lists[ei[1][j]].append(self.local[ei[0][j]])
+            lists[ei[0][j]].append(self.local[ei[1][j]])
         
         ent=[     
             self.__column_wise_entropy(torch.stack(l))
@@ -399,21 +417,26 @@ class StreamTGBase():
         ent = torch.stack(ent)
         structure_cols.append(ent)
 
-        return torch.cat(structure_cols, dim=1)
-
+        if len(idxs) > 1:
+            return torch.cat(structure_cols, dim=1)
+        return torch.cat(structure_cols, dim=1).squeeze()
+    
     def __column_wise_entropy(self, mat):
         c = mat.sum(dim=0)
         ent = -((mat/c) * torch.log2(mat/c)).sum(dim=0)
         return ent
 
-    def get(self):
+    def get(self, idx=None):
+        if idx is None:
+            idx = torch.arange(self.local.size(0))
+
         return torch.cat([
-            self.local,
-            self.calc_structural(), 
-            self.in_aggr.get_value(),
-            self.out_aggr.get_value(),
-            self.bi_aggr.get_value()
-        ], dim=1) 
+            self.local[idx],
+            self.calc_structural(idx), 
+            self.in_aggr.get_value(idx),
+            self.out_aggr.get_value(idx),
+            self.bi_aggr.get_value(idx)
+        ], dim=-1) 
 
 
 if __name__ == '__main__':
@@ -441,7 +464,7 @@ if __name__ == '__main__':
         f = feats[i]
         tg.add_edge(src_dst,f)
 
-    print(tg.get()[:,-9:])
+    print(tg.get([1,2,0]))
 
     '''
     Manually calculated, expect to find
