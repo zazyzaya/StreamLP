@@ -150,8 +150,8 @@ class StreamTGBaseEncoder():
         self.tot = torch.zeros(num_nodes,1)
         
         self.sum = torch.zeros(*args)
-        self.min = torch.full(args, float('inf'))
-        self.max = torch.full(args, float('-inf'))
+        self.min = torch.zeros(*args) #, float('inf'))
+        self.max = torch.zeros(*args) #, float('-inf'))
 
         self.calc_entropy = entropy
         if entropy:
@@ -168,14 +168,14 @@ class StreamTGBaseEncoder():
             idxs = [idxs]
 
         # Need to calculate std and mean from observed running totals
-        mean = self.sum[idxs] / self.tot[idxs]
-        std = torch.sqrt(self.S[idxs] / self.tot[idxs])
+        mean = (self.sum[idxs] / self.tot[idxs]).nan_to_num(0)
+        std = torch.sqrt(self.S[idxs] / self.tot[idxs]).nan_to_num(0)
 
         to_tensor = [
             self.sum[idxs],
-            self.min[idxs],
-            self.max[idxs],
             mean, 
+            self.max[idxs],
+            self.min[idxs],
             std 
         ]
 
@@ -201,29 +201,26 @@ class StreamTGBaseEncoder():
         # waste a bunch of memory)
         dif = (idx+1) - self.tot.size(0)
 
-        for key in ['S', 'tot', 'sum']:
+        for key in ['S', 'tot', 'sum', 'max', 'min']:
             # Can't pass by reference w/o doing this?
             self.__dict__[key] = torch.cat([
                 self.__dict__[key], 
                 torch.zeros(dif, self.__dict__[key].size(1))
             ], dim=0)
 
-        # Max and min have to be treated a little differently 
+        '''
+        # Inf values are slipping into the data. Not sure how the OG
+        # authors delt with this, it appears to still be in their code
+        # but I'm just initializing to 0 
         self.max = torch.cat([
             self.max, 
-            torch.full(
-                (dif, self.max.size(1)), 
-                float('-inf')
-            )
+            torch.full((dif, self.max.size(1)), float('-inf'))
         ])
-
         self.min = torch.cat([
             self.min, 
-            torch.full(
-                (dif, self.min.size(1)), 
-                float('inf')
-            )
+            torch.full((dif, self.min.size(1)), float('inf'))
         ])
+        '''
 
         if self.calc_entropy:
             self.ent += [
@@ -323,14 +320,24 @@ class StreamTGBase():
         self.out_aggr = StreamTGBaseEncoder(n_feats, n_nodes, entropy=entropy)
         self.bi_aggr = StreamTGBaseEncoder(n_feats, n_nodes, entropy=entropy)
 
+        # Time feature aggregators 
+        # (Could technically append to feat aggrs, but seems like
+        # that'd take more time)
+        self.in_ts = StreamTGBaseEncoder(1, n_nodes, entropy=entropy)
+        self.out_ts = StreamTGBaseEncoder(1, n_nodes, entropy=entropy)
+        self.bi_ts = StreamTGBaseEncoder(1, n_nodes, entropy=entropy)
+
         # Just counts in/out/bi edges from this node
         self.local = torch.zeros(n_nodes, 3)
+        self.last_seen = torch.zeros(n_nodes, 3)
         self.IN = 0
         self.OUT = 1
         self.BI = 2
 
         # Neighbors as of this time
         self.neighbors = defaultdict(set)
+        self.entropy = entropy
+        self.n_feats = n_feats
 
     def __add_if_unseen(self, idx):
         if idx < self.local.size(0):
@@ -346,9 +353,27 @@ class StreamTGBase():
             torch.zeros(dif, self.local.size(1))
         ], dim=0)
 
-    def add_edge(self, src_dst, edge_feat, return_value=False):
+        self.local = torch.cat([
+            self.last_seen,
+            torch.zeros(dif)
+        ])
+
+    def add_edge(self, src_dst, ts, edge_feat, return_value=False):
         src,dst = src_dst 
         self.__add_if_unseen(max(src,dst))
+
+        # Update ts aggrs
+        in_ts = ts - self.last_seen[src, self.IN]
+        out_ts = ts - self.last_seen[dst, self.OUT]
+        bi_ts = ts - self.last_seen[src_dst, self.BI]
+        
+        self.in_ts.add(dst, in_ts.unsqueeze(-1))
+        self.out_ts.add(src, out_ts.unsqueeze(-1))
+        self.bi_ts.add(src_dst, bi_ts.unsqueeze(-1))
+
+        self.last_seen[src, self.IN] = ts 
+        self.last_seen[dst, self.OUT] = ts 
+        self.last_seen[src_dst, self.BI] = ts
 
         # Update degree counts
         self.local[dst, self.IN] += 1
@@ -405,85 +430,136 @@ class StreamTGBase():
             scatter_std(*args, **kwargs)
         ]
 
-        # There's prob a more efficient way to do this but..
-        lists = [[] for _ in range(num_nodes)]
-        for j in range(ei.size(1)):
-            lists[ei[0][j]].append(self.local[ei[1][j]])
-        
-        ent=[     
-            self.__column_wise_entropy(torch.stack(l))
-            for l in lists
-        ]
-        ent = torch.stack(ent)
-        structure_cols.append(ent)
+        if self.entropy:
+            # There's prob a more efficient way to do this but..
+            lists = [[] for _ in range(num_nodes)]
+            for j in range(ei.size(1)):
+                lists[ei[0][j]].append(
+                    self.local[ei[1][j]]
+                )
+            
+            ent=[     
+                self.__column_wise_entropy(torch.stack(l))
+                for l in lists
+            ]
+            ent = torch.stack(ent)
+            structure_cols.append(ent)
 
         if len(idxs) > 1:
             return torch.cat(structure_cols, dim=1)
         return torch.cat(structure_cols, dim=1).squeeze()
     
     def __column_wise_entropy(self, mat):
-        c = mat.sum(dim=0)
-        ent = -((mat/c) * torch.log2(mat/c)).sum(dim=0)
-        return ent
+        ent = []
+        for i in range(mat.size(1)):
+            col = mat[:,i].unique(return_counts=True)[1]
+            c = col.sum()
+            ent.append(-((col/c) * torch.log2(col/c)).sum())
+        
+        return torch.tensor(ent)
 
     def get(self, idx=None):
         if idx is None:
             idx = torch.arange(self.local.size(0))
 
-        return torch.cat([
+        ret = torch.cat([
             self.local[idx],
             self.calc_structural(idx), 
             self.in_aggr.get_value(idx),
+            self.in_ts.get_value(idx),
             self.out_aggr.get_value(idx),
-            self.bi_aggr.get_value(idx)
+            self.out_ts.get_value(idx),
+            self.bi_aggr.get_value(idx),
+            self.bi_ts.get_value(idx)
         ], dim=-1) 
+
+        return ret 
+
+def mask_feat(names, size, directions=['in','out','bi'], has_entropy=False):
+    '''
+    Returns a mask of only the specified features/directions for each node
+    '''
+    
+    allowed = [
+        'local', 'structural', 'times', 'sum', 'mean', 
+        'max', 'min', 'std', 'entropy'
+    ]
+    for name in names:
+        assert name in allowed, '%s not in allowed list %s' % (name, str(allowed))
+
+    m = torch.zeros(size, dtype=torch.bool)
+    
+    neighborhood = 18 if has_entropy else 15
+    per_feat = 6 if has_entropy else 5
+
+    # Need to derive edge feats given feature vec looks like:
+    # 3 + 3*6 || 3*5 + [f * (6 || 5) + 6 || 5] * 3
+    # where || denotes the left side if ent the right otherwise
+    edge_feats = size-3    # local
+    edge_feats -= neighborhood
+    edge_feats /= 3             # in/out/both
+    edge_feats -= per_feat      # timestamps
+    edge_feats /= per_feat      # features
+
+    # Non-variable length part (other than entropy)
+    node_feats = 3
+    edge_start = 3 + 3*per_feat
+    edge_size = edge_feats*per_feat
+
+    fn_map = {
+        'sum':0, 'mean': 1, 'max':2,
+        'min':3, 'std': 4, 'entropy':5
+    }
+
+    if 'local' in names:
+        m[:node_feats] = True 
+        names.remove('local')
+
+    structural=False
+    if 'structural' in names:
+        structural=True 
+        names.remove('structural')
+
+    ts=False 
+    if 'times' in names:
+        ts = True 
+        names.remove('times')
+
+    # User can just input times/structural and get only
+    # those features for every function
+    no_edges = False
+    if (ts or structural) and names == []:
+        names = [k for k in fn_map.keys()]
+        if not has_entropy:
+            names.remove('entropy')
+        no_edges = True
+
+    dir_map = {'in':0, 'out':1, 'bi':2}
+    directions = [dir_map[d] for d in directions]
+
+    for name in names:
+        for i in directions:
+            if not no_edges:
+                    # Local feats       # Which fn             #ts        #direction
+                st = edge_start + fn_map[name]*edge_feats + per_feat*i + edge_size*i 
+                en = st + edge_feats
+                m[int(st):int(en)] = True 
+
+            if ts: 
+                # Kind of convoluted... skip edge start, skip edge features 
+                # and any time features we've already read, then we're pointed at 
+                # the right place
+                loc = int(edge_start + edge_size*(i+1) + per_feat*i + fn_map[name])
+                m[loc] = True 
+
+            if structural:
+                loc = int(node_feats + 3*fn_map[name] + i) 
+                m[loc] = True 
+
+    return m
+
+
 
 
 if __name__ == '__main__':
-    ei = torch.tensor([
-        [0,1],
-        [1,2],
-        [2,0],
-        [0,1],
-        [3,4],
-        [4,3]
-    ])
-
-    feats = torch.tensor([
-        [1,1,1],
-        [1,2,0],
-        [1,3,1],
-        [1,3,1],
-        [1,2,10],
-        [1,1,1]
-    ])
-
-    tg = StreamTGBase(3, n_nodes=1)
-    for i in range(ei.size(0)):
-        src_dst = ei[i]
-        f = feats[i]
-        tg.add_edge(src_dst,f)
-
-    print(tg.get([1,2,0]))
-
-    '''
-    Manually calculated, expect to find
-    
-    mean        std             ent
-    1,2.3,1     | 0,0.94,0,     | 0,0.91,0,
-    1,2,0.66,   | 0,0.81,0.47,  | 0,1.58,0.91,
-    1,2.5,0.5,  | 0,0.5,0.5,    | 0,1,1,
-    1,1.5,5.5,  | 0,0.5,4.5,    | 0,1,1,
-    1,1.5,5.5   | 0,0.5,4.5     | 0,1,1,
-
-    for the bidirectional edges
-    '''
-    '''                                    _ Floating point error? 
-    Result:                              /                      \ 
-                                        v                        v
-    1.,2.3,1.,      0.,0.942,0.,    -1.1921e-07,0.918,-1.1921e-07,
-    1.,2.,0.66,     0.,0.81,0.47,   -1.1921e-07,1.58,0.918],
-    1.,2.5,0.5,     0.,0.5,0.5,     0.,1.,1.,
-    1.,1.5,5.5,     0.,0.5,4.5      0.,1.,1.,
-    1.,1.5,5.5,     0.,0.5,4.5      0.,1.,1.,
-    '''
+    mask(['structural'], 78, directions=['bi'])
