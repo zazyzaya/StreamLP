@@ -1,0 +1,8 @@
+MLP on just edge features (no graph)
+    Wikipedia:
+    auc-mean    0.634247
+    auc-sem     0.003357
+
+    Reddit:
+    auc-mean    0.517456
+    auc-sem     0.000691

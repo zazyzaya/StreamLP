@@ -14,6 +14,7 @@ from tqdm import tqdm
 from models.mlp import BinaryClassifier
 from models.tgbase import mask_feat
 
+torch.set_num_threads(16)
 DATA_HOME = os.path.dirname(__file__) + '/mixer-datasets/precalculated/tgbase/processed/'
 HYPERPARAMS = SimpleNamespace(
     epochs=10, bs=100, patience=float('inf'), lr=3e-4
@@ -64,21 +65,29 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
     weights = torch.tensor([weight1])
 
     stats = dict()
-    for feat in ['local', 'structural', 'times', 'sum', 'mean', 'max', 'min', 'std', 'entropy']:
-        mask = ~mask_feat([feat], tr_x.size(1))
-        aucs = []
+    feats = ['local', 'structural', 'times', 'sum', 'mean', 'max', 'min', 'std', 'entropy']
+    for i in range(len(feats)):
+        for j in range(i+1,len(feats)):
+            # Every unique combo (where (a,b) == (b,a) so is not unique)
+            f1 = feats[i]
+            f2 = feats[j]
+            f_str = f1+'-'+f2
+            print(f_str)
 
-        for _ in range(10):
-            model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
-            train(
-                hp, model, 
-                tr_x[:,mask], tr_y, 
-                va_x[:,mask], va_y, 
-                te_x[:,mask], te_y
-            )
-            aucs.append(eval(model, te_x[:,mask], te_y))
+            mask = ~mask_feat([f1,f2], tr_x.size(1))
+            aucs = []
 
-        stats[feat] = aucs 
+            for _ in range(10):
+                model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
+                train(
+                    hp, model, 
+                    tr_x[:,mask], tr_y, 
+                    va_x[:,mask], va_y, 
+                    te_x[:,mask], te_y
+                )
+                aucs.append(eval(model, te_x[:,mask], te_y))
+
+            stats[f_str] = aucs 
 
     df = pd.DataFrame(stats)
     with open('results/tgstream/feat_test.csv', 'w') as f:
@@ -119,13 +128,19 @@ def main(hp, fname, no_h=False):
     weight1 = 1-weight0
     weights = torch.tensor([weight1])
 
-    model = BinaryClassifier(x.size(1), class_weights=weights)
-    best = train(hp, model, tr_x, tr_y, va_x, va_y, te_x, te_y)
+    aucs = []
+    for _ in range(10):
+        model = BinaryClassifier(x.size(1), class_weights=weights)
+        best = train(hp, model, tr_x, tr_y, va_x, va_y, te_x, te_y)
+        model.load_state_dict(best['sd'])
+        aucs.append(eval(model, te_x, te_y))
+        print(aucs[-1])
 
-    model.load_state_dict(best['sd'])
-    auc = eval(model, te_x, te_y)
-    print(auc)
-    return auc
+    df = pd.DataFrame({'auc': aucs})
+    print(df['auc'].mean())
+    print(df['auc'].sem())
+
+    return df
 
 if __name__ == '__main__':
     args = ArgumentParser()
