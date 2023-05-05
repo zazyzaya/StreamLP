@@ -475,7 +475,7 @@ class StreamTGBase():
 
         return ret 
 
-def mask_feat(names, size, directions=['in','out','bi'], has_entropy=False):
+def mask_feat(names, size, directions=['in','out','bi'], has_entropy=True):
     '''
     Returns a mask of only the specified features/directions for each node
     '''

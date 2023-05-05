@@ -65,7 +65,25 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
     weights = torch.tensor([weight1])
 
     stats = dict()
-    feats = ['local', 'structural', 'times', 'sum', 'mean', 'max', 'min', 'std', 'entropy']
+    feats = ['times', 'entropy', 'local', 'structural', 'sum', 'mean', 'max', 'min', 'std']
+    for f_str in feats:
+        print(f_str)
+
+        mask = ~mask_feat([f_str], tr_x.size(1))
+        aucs = []
+
+        for _ in range(10):
+            model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
+            train(
+                hp, model, 
+                tr_x[:,mask], tr_y, 
+                va_x[:,mask], va_y, 
+                te_x[:,mask], te_y
+            )
+            aucs.append(eval(model, te_x[:,mask], te_y))
+
+        stats[f_str] = aucs
+
     for i in range(len(feats)):
         for j in range(i+1,len(feats)):
             # Every unique combo (where (a,b) == (b,a) so is not unique)
@@ -87,10 +105,10 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
                 )
                 aucs.append(eval(model, te_x[:,mask], te_y))
 
-            stats[f_str] = aucs 
+            stats[f_str] = aucs  
 
     df = pd.DataFrame(stats)
-    with open('results/tgstream/feat_test.csv', 'w') as f:
+    with open('results/tgstream/feat_test.csv', 'a') as f:
         f.write(df.to_csv())
         f.write(df.mean().to_csv())
         f.write(df.sem().to_csv())
