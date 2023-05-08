@@ -55,8 +55,8 @@ def preprocess(fname, force=False):
     return ret 
 
 @torch.no_grad()
-def build_dataset(fname, no_h=True, force=False, force_tg=False):
-    outf = DATA_HOME + 'processed/' + fname + '.pt'
+def build_dataset(fname, no_h=True, force=False, force_tg=False, suffix=''):
+    outf = DATA_HOME + 'processed/' + fname + suffix + '.pt'
 
     if os.path.exists(outf) and not force and not force_tg:
         return torch.load(outf)
@@ -85,15 +85,19 @@ def build_dataset(fname, no_h=True, force=False, force_tg=False):
 
 if __name__ == '__main__':
     args = ArgumentParser()
-    args.add_argument('-d', '--dataset')
+    args.add_argument('-d', '--dataset', default='wikipedia')
     args.add_argument('-e', '--entropy', action='store_false')
     args.add_argument('-f','--force', action='store_true')
-    args.add_argument('-t','--force-tg',action='store_true')
+    args.add_argument('-t','--force-tg', action='store_true')
+    args.add_argument('-s', '--suffix', default='')
 
     args = args.parse_args()
+    print(args)
+
     build_dataset(
         args.dataset,
         no_h=args.entropy,
         force=args.force,
-        force_tg=args.force_tg
+        force_tg=args.force_tg,
+        suffix=args.suffix
     )

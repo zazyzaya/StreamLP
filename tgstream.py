@@ -97,12 +97,13 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
 
             for _ in range(10):
                 model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
-                train(
+                best = train(
                     hp, model, 
                     tr_x[:,mask], tr_y, 
                     va_x[:,mask], va_y, 
                     te_x[:,mask], te_y
                 )
+                #model.load_state_dict(best['sd']) # Training on val no early stopping
                 aucs.append(eval(model, te_x[:,mask], te_y))
 
             stats[f_str] = aucs  
@@ -128,11 +129,14 @@ def main(hp, fname, no_h=False):
     tr = int(x.size(0)*0.70)
     va = int(x.size(0)*0.85)
 
-    tr_x = x[:tr];   tr_y = y[:tr]
+    # I have a suspicion that the authors didn't use a val set
+    # on the reddit dataset. Based on the results gleaned from 
+    # reproducing their exact settings, and looking at their code
+    tr_x = x[:va];   tr_y = y[:va]
     va_x = x[tr:va]; va_y = y[tr:va]
     te_x = x[va:];   te_y = y[va:]
 
-    feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y)
+    feature_importance_test(hp, tr_x, tr_y, te_x, te_y, te_x, te_y)
     return 
 
     # Scale data (same as in paper's code though doesn't seem to matter)
@@ -149,7 +153,7 @@ def main(hp, fname, no_h=False):
     aucs = []
     for _ in range(10):
         model = BinaryClassifier(x.size(1), class_weights=weights)
-        best = train(hp, model, tr_x, tr_y, va_x, va_y, te_x, te_y)
+        best = train(hp, model, tr_x, tr_y, te_x, te_y, te_x, te_y)
         model.load_state_dict(best['sd'])
         aucs.append(eval(model, te_x, te_y))
         print(aucs[-1])

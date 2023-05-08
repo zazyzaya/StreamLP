@@ -150,8 +150,8 @@ class StreamTGBaseEncoder():
         self.tot = torch.zeros(num_nodes,1)
         
         self.sum = torch.zeros(*args)
-        self.min = torch.zeros(*args) #, float('inf'))
-        self.max = torch.zeros(*args) #, float('-inf'))
+        self.min = torch.full(args, float('inf'))
+        self.max = torch.full(args, float('-inf'))
 
         self.calc_entropy = entropy
         if entropy:
@@ -192,7 +192,7 @@ class StreamTGBaseEncoder():
                 to_tensor.append(ent[0])
 
         # Concat all features 
-        return torch.cat(to_tensor, dim=-1)
+        return torch.cat(to_tensor, dim=-1).nan_to_num(0,0,0)
 
     def __add_unseen(self, idx):
         # More or less assumes ids are sequential. So it's unlikely
@@ -208,10 +208,10 @@ class StreamTGBaseEncoder():
                 torch.zeros(dif, self.__dict__[key].size(1))
             ], dim=0)
 
-        '''
         # Inf values are slipping into the data. Not sure how the OG
         # authors delt with this, it appears to still be in their code
         # but I'm just initializing to 0 
+        # UPDATE: changed get_value to have .nan_to_num to overwrite inf values to 0
         self.max = torch.cat([
             self.max, 
             torch.full((dif, self.max.size(1)), float('-inf'))
@@ -220,7 +220,6 @@ class StreamTGBaseEncoder():
             self.min, 
             torch.full((dif, self.min.size(1)), float('inf'))
         ])
-        '''
 
         if self.calc_entropy:
             self.ent += [
@@ -562,4 +561,4 @@ def mask_feat(names, size, directions=['in','out','bi'], has_entropy=True):
 
 
 if __name__ == '__main__':
-    mask(['structural'], 78, directions=['bi'])
+    mask_feat(['structural'], 78, directions=['bi'])
