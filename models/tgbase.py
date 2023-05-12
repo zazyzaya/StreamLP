@@ -140,9 +140,6 @@ class TGBase(nn.Module):
 
 class StreamTGBaseEncoder():
     def __init__(self, num_feats, num_nodes, entropy=True):
-        '''
-        TODO include entropy (is this even possible?)
-        '''
         self.num_feats = num_feats
 
         args = (num_nodes, num_feats)
@@ -194,6 +191,9 @@ class StreamTGBaseEncoder():
         # Concat all features 
         return torch.cat(to_tensor, dim=-1).nan_to_num(0,0,0)
 
+    def __getitem__(self, idx):
+        return self.get_value(idx)
+
     def __add_unseen(self, idx):
         # More or less assumes ids are sequential. So it's unlikely
         # that it will get as edge 1 something like 0->1 then edge 
@@ -201,7 +201,7 @@ class StreamTGBaseEncoder():
         # waste a bunch of memory)
         dif = (idx+1) - self.tot.size(0)
 
-        for key in ['S', 'tot', 'sum', 'max', 'min']:
+        for key in ['S', 'tot', 'sum']:
             # Can't pass by reference w/o doing this?
             self.__dict__[key] = torch.cat([
                 self.__dict__[key], 

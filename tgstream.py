@@ -5,6 +5,7 @@ import os
 from types import SimpleNamespace
 
 import pandas as pd 
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import MinMaxScaler
 import torch 
@@ -52,7 +53,7 @@ def eval(model, x,y):
     y_hat = model.pred(x)
     return roc_auc_score(y, y_hat)
 
-def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
+def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
     # Scale data (same as in paper's code though doesn't seem to matter)
     mm = MinMaxScaler()
     tr_x = torch.from_numpy(mm.fit_transform(tr_x)).float()
@@ -65,6 +66,21 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
     weights = torch.tensor([weight1])
 
     stats = dict()
+
+    # Control group: do one with no missing features:
+    aucs = []
+    for _ in range(10):
+        model = BinaryClassifier(tr_x.size(1), class_weights=weights)
+        best = train(
+            hp, model, 
+            tr_x, tr_y, 
+            va_x, va_y, 
+            te_x, te_y
+        )
+        model.load_state_dict(best['sd'])
+        aucs.append(eval(model, te_x, te_y))
+    stats['nothing'] = aucs
+
     feats = ['times', 'entropy', 'local', 'structural', 'sum', 'mean', 'max', 'min', 'std']
     for f_str in feats:
         print(f_str)
@@ -74,12 +90,13 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
 
         for _ in range(10):
             model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
-            train(
+            best = train(
                 hp, model, 
                 tr_x[:,mask], tr_y, 
                 va_x[:,mask], va_y, 
                 te_x[:,mask], te_y
             )
+            model.load_state_dict(best['sd'])
             aucs.append(eval(model, te_x[:,mask], te_y))
 
         stats[f_str] = aucs
@@ -103,42 +120,18 @@ def feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
                     va_x[:,mask], va_y, 
                     te_x[:,mask], te_y
                 )
-                #model.load_state_dict(best['sd']) # Training on val no early stopping
+                model.load_state_dict(best['sd'])
                 aucs.append(eval(model, te_x[:,mask], te_y))
 
             stats[f_str] = aucs  
 
     df = pd.DataFrame(stats)
-    with open('results/tgstream/feat_test.csv', 'a') as f:
+    with open('results/tgstream/missing_feat_test.csv', 'a') as f:
         f.write(df.to_csv())
         f.write(df.mean().to_csv())
         f.write(df.sem().to_csv())
 
-
-def main(hp, fname, no_h=False):
-    fname = DATA_HOME + fname 
-    if no_h: 
-        fname += '_no_h'
-    fname += '.pt'
-
-    x,y = torch.load(fname)
-    y = y.float().unsqueeze(-1)
-
-    # Chronological split as in the paper
-    # 70 : 15 : 15
-    tr = int(x.size(0)*0.70)
-    va = int(x.size(0)*0.85)
-
-    # I have a suspicion that the authors didn't use a val set
-    # on the reddit dataset. Based on the results gleaned from 
-    # reproducing their exact settings, and looking at their code
-    tr_x = x[:va];   tr_y = y[:va]
-    va_x = x[tr:va]; va_y = y[tr:va]
-    te_x = x[va:];   te_y = y[va:]
-
-    feature_importance_test(hp, tr_x, tr_y, te_x, te_y, te_x, te_y)
-    return 
-
+def single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
     # Scale data (same as in paper's code though doesn't seem to matter)
     mm = MinMaxScaler()
     tr_x = torch.from_numpy(mm.fit_transform(tr_x)).float()
@@ -150,23 +143,87 @@ def main(hp, fname, no_h=False):
     weight1 = 1-weight0
     weights = torch.tensor([weight1])
 
+    stats = dict()
+
+    feats = ['entropy', 'sum', 'mean', 'max', 'min', 'std']
+    for f_str in feats:
+        print(f_str)
+
+        mask = mask_feat([f_str], tr_x.size(1))
+        aucs = []
+
+        for _ in range(10):
+            model = BinaryClassifier(tr_x[:,mask].size(1), class_weights=weights)
+            best = train(
+                hp, model, 
+                tr_x[:,mask], tr_y, 
+                va_x[:,mask], va_y, 
+                te_x[:,mask], te_y
+            )
+            model.load_state_dict(best['sd'])
+            aucs.append(eval(model, te_x[:,mask], te_y))
+
+        stats[f_str] = aucs
+
+    df = pd.DataFrame(stats)
+    with open('results/tgstream/single_feat_test.csv', 'a') as f:
+        f.write(df.to_csv())
+        f.write(df.mean().to_csv())
+        f.write(df.sem().to_csv())
+
+def random_forest(fname):
+    fname = DATA_HOME + fname + '.pt'
+    x,y = torch.load(fname)
+    y = y.float()
+
+    # Chronological split as in the paper
+    # 85 : 15
+    tr = int(x.size(0)*0.85)
+
+    tr_x = x[:tr];   tr_y = y[:tr]
+    te_x = x[tr:];   te_y = y[tr:]
+
     aucs = []
-    for _ in range(10):
-        model = BinaryClassifier(x.size(1), class_weights=weights)
-        best = train(hp, model, tr_x, tr_y, te_x, te_y, te_x, te_y)
-        model.load_state_dict(best['sd'])
-        aucs.append(eval(model, te_x, te_y))
-        print(aucs[-1])
+    for i in range(10):
+        print(f"Fitting ({i+1}/10)...", end='\t')
+        rf = RandomForestClassifier(n_jobs=32)
+        rf.fit(tr_x, tr_y)
+        preds = rf.predict_proba(te_x)
 
-    df = pd.DataFrame({'auc': aucs})
-    print(df['auc'].mean())
-    print(df['auc'].sem())
+        auc = roc_auc_score(te_y, preds)
+        print(auc, '\n')
+        aucs.append(auc)
 
-    return df
+    df = pd.DataFrame({'auc':aucs})
+    print(df.mean())
+    print(df.sem())
+
+
+def main(hp, fname):
+    fname = DATA_HOME + fname + '.pt'
+
+    x,y = torch.load(fname)
+    y = y.float().unsqueeze(-1)
+
+    # Chronological split as in the paper
+    # 70 : 15 : 15
+    tr = int(x.size(0)*0.70)
+    va = int(x.size(0)*0.85)
+
+    tr_x = x[:tr];   tr_y = y[:tr]
+    va_x = x[tr:va]; va_y = y[tr:va]
+    te_x = x[va:];   te_y = y[va:]
+
+    missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y)
+    single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y)
 
 if __name__ == '__main__':
     args = ArgumentParser()
     args.add_argument('-d', '--dataset', default='wikipedia')
+    args.add_argument('--rf', action='store_true')
     args = args.parse_args()
 
-    main(HYPERPARAMS, args.dataset)
+    if args.rf:
+        random_forest(args.dataset)
+    else:
+        main(HYPERPARAMS, args.dataset)

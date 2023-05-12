@@ -6,6 +6,7 @@ import torch
 from tqdm import tqdm 
 
 from models.tgbase import StreamTGBase
+from models.tgbase_prop import ConvolutionalTGBase
 
 RAW_HOME = os.path.dirname(__file__) + '/mixer-datasets/'
 DATA_HOME = os.path.dirname(__file__) + '/mixer-datasets/precalculated/tgbase/'
@@ -55,15 +56,26 @@ def preprocess(fname, force=False):
     return ret 
 
 @torch.no_grad()
-def build_dataset(fname, no_h=True, force=False, force_tg=False, suffix=''):
+def build_dataset(fname, no_h=True, force=False, force_tg=False, suffix='', prop=False, decay=0.):
     outf = DATA_HOME + 'processed/' + fname + suffix + '.pt'
+    if prop:
+        outf = outf.replace('.pt', '_prop.pt')
 
     if os.path.exists(outf) and not force and not force_tg:
         return torch.load(outf)
 
     ei, feats, ts, ys = preprocess(fname, force=force)
-    tg = StreamTGBase(feats.size(1), n_nodes=10_000, entropy=not no_h)
-
+    if not prop:
+        tg = StreamTGBase(
+            feats.size(1), n_nodes=10_000, 
+            entropy=not no_h
+        )
+    else:
+        tg = ConvolutionalTGBase(
+            feats.size(1), n_nodes=10_000, 
+            entropy=not no_h, decay=decay
+        )
+        
     rows = []
     for i in tqdm(range(feats.size(0))):
         feat = tg.add_edge(
@@ -90,6 +102,8 @@ if __name__ == '__main__':
     args.add_argument('-f','--force', action='store_true')
     args.add_argument('-t','--force-tg', action='store_true')
     args.add_argument('-s', '--suffix', default='')
+    args.add_argument('-p', '--propagate', action='store_true')
+    args.add_argument('--decay', type=float)
 
     args = args.parse_args()
     print(args)
@@ -99,5 +113,7 @@ if __name__ == '__main__':
         no_h=args.entropy,
         force=args.force,
         force_tg=args.force_tg,
-        suffix=args.suffix
+        suffix=args.suffix,
+        prop=args.propagate,
+        decay=args.decay
     )
