@@ -59,7 +59,7 @@ def preprocess(fname, force=False):
 def build_dataset(fname, no_h=True, force=False, force_tg=False, suffix='', prop=False, decay=0.):
     outf = DATA_HOME + 'processed/' + fname + suffix + '.pt'
     if prop:
-        outf = outf.replace('.pt', '_prop.pt')
+        outf = outf.replace('.pt', f'_prop{decay:0.2f}.pt')
 
     if os.path.exists(outf) and not force and not force_tg:
         return torch.load(outf)
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     args.add_argument('-t','--force-tg', action='store_true')
     args.add_argument('-s', '--suffix', default='')
     args.add_argument('-p', '--propagate', action='store_true')
-    args.add_argument('--decay', type=float)
+    args.add_argument('--decay', type=float, default=0.)
 
     args = args.parse_args()
     print(args)

@@ -53,7 +53,7 @@ def eval(model, x,y):
     y_hat = model.pred(x)
     return roc_auc_score(y, y_hat)
 
-def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
+def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y, no_val=False):
     # Scale data (same as in paper's code though doesn't seem to matter)
     mm = MinMaxScaler()
     tr_x = torch.from_numpy(mm.fit_transform(tr_x)).float()
@@ -77,7 +77,8 @@ def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
             va_x, va_y, 
             te_x, te_y
         )
-        model.load_state_dict(best['sd'])
+        if not no_val:
+            model.load_state_dict(best['sd'])
         aucs.append(eval(model, te_x, te_y))
     stats['nothing'] = aucs
 
@@ -96,7 +97,8 @@ def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
                 va_x[:,mask], va_y, 
                 te_x[:,mask], te_y
             )
-            model.load_state_dict(best['sd'])
+            if not no_val:
+                model.load_state_dict(best['sd'])
             aucs.append(eval(model, te_x[:,mask], te_y))
 
         stats[f_str] = aucs
@@ -120,18 +122,22 @@ def missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
                     va_x[:,mask], va_y, 
                     te_x[:,mask], te_y
                 )
-                model.load_state_dict(best['sd'])
+                if not no_val:
+                    model.load_state_dict(best['sd'])
                 aucs.append(eval(model, te_x[:,mask], te_y))
 
             stats[f_str] = aucs  
 
     df = pd.DataFrame(stats)
-    with open('results/tgstream/missing_feat_test.csv', 'a') as f:
+    out_f = 'results/tgstream/missing_feat_test.csv'
+    if no_val:
+        out_f = out_f.replace('.csv', '_no_val.csv')
+    with open(out_f, 'a') as f:
         f.write(df.to_csv())
         f.write(df.mean().to_csv())
         f.write(df.sem().to_csv())
 
-def single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
+def single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y, no_val=False):
     # Scale data (same as in paper's code though doesn't seem to matter)
     mm = MinMaxScaler()
     tr_x = torch.from_numpy(mm.fit_transform(tr_x)).float()
@@ -160,13 +166,18 @@ def single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y):
                 va_x[:,mask], va_y, 
                 te_x[:,mask], te_y
             )
-            model.load_state_dict(best['sd'])
+            if not no_val:
+                model.load_state_dict(best['sd'])
             aucs.append(eval(model, te_x[:,mask], te_y))
 
         stats[f_str] = aucs
 
     df = pd.DataFrame(stats)
-    with open('results/tgstream/single_feat_test.csv', 'a') as f:
+    out_f = 'results/tgstream/single_feat_test.csv'
+    if no_val:
+        out_f = out_f.replace('.csv', '_no_val.csv')
+
+    with open(out_f, 'a') as f:
         f.write(df.to_csv())
         f.write(df.mean().to_csv())
         f.write(df.sem().to_csv())
@@ -185,10 +196,10 @@ def random_forest(fname):
 
     aucs = []
     for i in range(10):
-        print(f"Fitting ({i+1}/10)...", end='\t')
+        print(f"Fitting ({i+1}/10)...", end='\t', flush=True)
         rf = RandomForestClassifier(n_jobs=32)
         rf.fit(tr_x, tr_y)
-        preds = rf.predict_proba(te_x)
+        preds = rf.predict_proba(te_x)[:,1]
 
         auc = roc_auc_score(te_y, preds)
         print(auc, '\n')
@@ -199,7 +210,7 @@ def random_forest(fname):
     print(df.sem())
 
 
-def main(hp, fname):
+def main(hp, fname, no_val=False):
     fname = DATA_HOME + fname + '.pt'
 
     x,y = torch.load(fname)
@@ -210,20 +221,56 @@ def main(hp, fname):
     tr = int(x.size(0)*0.70)
     va = int(x.size(0)*0.85)
 
-    tr_x = x[:tr];   tr_y = y[:tr]
-    va_x = x[tr:va]; va_y = y[tr:va]
-    te_x = x[va:];   te_y = y[va:]
+    if not no_val:
+        tr_x = x[:tr];   tr_y = y[:tr]
+        va_x = x[tr:va]; va_y = y[tr:va]
+        te_x = x[va:];   te_y = y[va:]
+    else:
+        tr_x = x[:va];   tr_y = y[:va]
+        va_x = x[tr:va]; va_y = y[tr:va]
+        te_x = x[va:];   te_y = y[va:]
 
-    missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y)
-    single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y)
+    #missing_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y, no_val=no_val)
+    #single_feature_importance_test(hp, tr_x, tr_y, va_x, va_y, te_x, te_y, no_val=no_val)
+    # Bias to care more about rare 1-labeled rows
+    weight0 = tr_y.sum()/tr_y.size(0)
+    weight1 = 1-weight0
+    weights = torch.tensor([weight1])
+
+    stats = dict()
+    aucs = []
+    for _ in range(10):
+        model = BinaryClassifier(tr_x.size(1), class_weights=weights)
+        best = train(
+            hp, model, 
+            tr_x, tr_y, 
+            va_x, va_y, 
+            te_x, te_y
+        )
+        if not no_val:
+            model.load_state_dict(best['sd'])
+        aucs.append(eval(model, te_x, te_y))
+    
+    stats['nothing'] = aucs
+    df = pd.DataFrame(stats)
+    out_f = 'results/tgstream/tbgase.csv'
+    if no_val:
+        out_f = out_f.replace('.csv', '_no_val.csv')
+
+    with open(out_f, 'a') as f:
+        f.write(str(hp)+'\n')
+        f.write(df.to_csv())
+        f.write(df.mean().to_csv())
+        f.write(df.sem().to_csv())
 
 if __name__ == '__main__':
     args = ArgumentParser()
     args.add_argument('-d', '--dataset', default='wikipedia')
     args.add_argument('--rf', action='store_true')
+    args.add_argument('--no-val', action='store_true')
     args = args.parse_args()
 
     if args.rf:
         random_forest(args.dataset)
     else:
-        main(HYPERPARAMS, args.dataset)
+        main(HYPERPARAMS, args.dataset, no_val=args.no_val)

@@ -22,7 +22,7 @@ class CustomTGBaseEncoder():
             self.tot = torch.zeros(num_nodes,1)
             self.aggr_keys.append('tot')
         
-        if mean or sum:
+        if mean or sum or std:
             self.sum = torch.zeros(*args)
             self.aggr_keys.append('sum')
 
@@ -131,14 +131,18 @@ class CustomTGBaseEncoder():
             self.__add_unseen(check)
 
         # In case hasn't been seen before
-        prev_mean = (self.sum[idx] / self.tot[idx]).nan_to_num(0)
+        prev_mean = 0
+        if self.has_std:
+            prev_mean = (self.sum[idx] / self.tot[idx]).nan_to_num(0)
 
-        self.tot[idx] += 1
-        self.sum[idx] += feat 
-        self.max[idx] = torch.max(self.max[idx], feat)
-        self.min[idx] = torch.min(self.min[idx], feat)
+        if self.has_std or self.has_mean or self.has_sum:
+            self.tot[idx] += 1
+            self.sum[idx] += feat 
 
-        cur_mean = self.sum[idx] / self.tot[idx]
+        if self.has_max:
+            self.max[idx] = torch.max(self.max[idx], feat)
+        if self.has_min:
+            self.min[idx] = torch.min(self.min[idx], feat)
 
         # Moving standard dev calculated by 
         # S_n = S_{n-1} + (x_n - mu_{n-1})(x_n - mu_n)
@@ -147,11 +151,14 @@ class CustomTGBaseEncoder():
         # the last term becomes: 
         # (x_n-mu_{n-1})(x_n - mu_n) = x_n^2 - x_n*mu_n - x_n*mu_{n-1} + mu_n*mu_{n-1}
         # which in variables we'll call a       b           c               d 
-        a = torch.pow(feat,2)
-        b = feat * cur_mean 
-        c = feat * prev_mean 
-        d = cur_mean * prev_mean
-        self.S[idx] += a-b-c+d 
+        if self.has_std:
+            cur_mean = self.sum[idx] / self.tot[idx]
+
+            a = torch.pow(feat,2)
+            b = feat * cur_mean 
+            c = feat * prev_mean 
+            d = cur_mean * prev_mean
+            self.S[idx] += a-b-c+d 
 
         if self.has_entropy:
             [self.ent[i].add(feat) for i in idx]
