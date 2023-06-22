@@ -18,3 +18,4 @@ def build_data():
     node_embs = []
     for i in range(n_files):
         g = torch.load(RAW+str(i)+'.pt')
+        z = tgb.forward(g.edge_index, g.ts, g.edge_attr, )

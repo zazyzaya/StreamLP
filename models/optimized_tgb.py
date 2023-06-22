@@ -2,12 +2,10 @@ from collections import defaultdict
 from collections.abc import Iterable
 
 import torch 
-from torch import nn
 from torch_scatter import (
     scatter_add, scatter_mean, 
     scatter_std, scatter_max
 )
-from torch_geometric.utils import to_undirected
 
 '''
 After testing removing various aggregators from vanilla
@@ -22,86 +20,6 @@ classification accuracy w/ p>0.05
         No min/ent: 0.733 +/- 0.0012
 
 '''
-class TGBase():
-    @torch.no_grad() # parameter-free 
-    def forward(self, ei, ts=None, feats=None, num_nodes=None):
-        cols = [self.struct_feats(ei, num_nodes),]
-            
-        if feats is not None:
-            if feats.dim() == 1:
-                feats = feats.unsqueeze(-1)
-            for i in range(feats.size(1)):
-                cols.append(self.edge_feats(feats[:,i], ei, num_nodes))
-
-        if ts is not None:
-            cols.append(self.edge_feats(ts, ei, num_nodes))
-        
-        return torch.cat(cols, dim=1)
-
-    def struct_feats(self, ei, num_nodes):
-        if num_nodes is None:
-            num_nodes = ei.max()+1
-        
-        # Used for degree counting    
-        x = torch.ones(ei.size(1),1, dtype=torch.float)
-
-        kwargs = dict(dim=0, dim_size=num_nodes)
-
-        # Individual feats 
-        in_deg = scatter_add(x, ei[1].unsqueeze(-1), **kwargs)
-        out_deg = scatter_add(x, ei[0].unsqueeze(-1), **kwargs)
-        tot_deg = in_deg+out_deg 
-
-        structure_cols = [in_deg, out_deg, tot_deg]
-        for i,val in enumerate([in_deg, out_deg, tot_deg]):
-            if i == 1:
-                ei = ei[[1,0]]
-            elif i == 2: 
-                ei = to_undirected(ei)
-
-            src = val[ei[0]]
-            dst = ei[1].unsqueeze(-1)
-            args = (src,dst)
-
-            structure_cols += [
-                scatter_add(*args,**kwargs),
-                scatter_mean(*args, **kwargs),
-                scatter_max(*args, **kwargs)[0],
-                scatter_std(*args, **kwargs)
-            ]
-
-        return torch.cat(structure_cols, dim=1)
-    
-    def edge_feats(self, val, ei, num_nodes):
-        if val.dim() == 1:
-            val = val.unsqueeze(-1)
-
-        if num_nodes is None:
-            num_nodes = ei.max()+1
-        kwargs = dict(dim=0, dim_size=num_nodes)
-
-        feat_cols = []
-        for i in range(3):
-            if i == 1:
-                ei = ei[[1,0]]
-            elif i == 2: 
-                ei = torch.cat([ei, ei[[1,0]]], dim=1)
-                val = val.repeat(2,1)
-
-            src = val
-            dst = ei[1].unsqueeze(-1)
-            args = (src,dst)
-
-            feat_cols += [
-                scatter_add(*args,**kwargs),
-                scatter_mean(*args, **kwargs),
-                scatter_max(*args, **kwargs)[0],
-                scatter_std(*args, **kwargs)
-            ]
-            
-        return torch.cat(feat_cols, dim=1)
-    
-
 class StreamTGBaseEncoder():
     def __init__(self, num_feats, num_nodes):
         self.num_feats = num_feats
@@ -112,6 +30,7 @@ class StreamTGBaseEncoder():
         
         self.sum = torch.zeros(*args)
         self.max = torch.full(args, float('-inf'))
+        self.n_nodes = num_nodes
 
     def get_value(self, idxs=None):
         if idxs is None:
@@ -137,7 +56,7 @@ class StreamTGBaseEncoder():
     def __getitem__(self, idx):
         return self.get_value(idx)
 
-    def __add_unseen(self, idx):
+    def _add_unseen(self, idx):
         # More or less assumes ids are sequential. So it's unlikely
         # that it will get as edge 1 something like 0->1 then edge 
         # two will be 1,000,000 -> 9,999,999 e.g. (will still work, will just
@@ -160,6 +79,8 @@ class StreamTGBaseEncoder():
             torch.full((dif, self.max.size(1)), float('-inf'))
         ])
 
+        self.n_nodes = self.tot.size(0)
+
     def add(self, idx, feat):
         '''
         Need to update total, count, min/max 
@@ -175,7 +96,7 @@ class StreamTGBaseEncoder():
 
         # If this is an unseen id 
         if check >= self.tot.size(0):
-            self.__add_unseen(check)
+            self._add_unseen(check)
 
         # In case hasn't been seen before
         prev_mean = (self.sum[idx] / self.tot[idx]).nan_to_num(0)
@@ -207,20 +128,20 @@ class BatchTGBaseEncoder(StreamTGBaseEncoder):
     and https://stackoverflow.com/questions/56402955/whats-the-formula-for-welfords-algorithm-for-variance-std-with-batch-updates
     '''
     def add(self, idxs, feats):    
-        check = max(idx) # type: ignore
+        check = idxs.max() 
 
         # If this is an unseen id 
         if check >= self.tot.size(0):
-            self.__add_unseen(check)
+            self._add_unseen(check)
 
-        prev_mean = (self.sum[idxs] / self.tot[idxs]).nan_to_num(0)
+        prev_mean = (self.sum / self.tot).nan_to_num(0)
 
-        n_updates = scatter_add(torch.ones(idxs.size(0),1), idxs, dim=0)
-        self.tot[idxs] += n_updates 
-        self.sum[idxs] += scatter_add(feats, idxs, dim=0)
-        self.max[idxs] = torch.max(self.max[idxs], scatter_max(feats, idxs, dim=0)[0])
+        n_updates = scatter_add(torch.ones(idxs.size(0),1), idxs, dim=0, dim_size=self.n_nodes)
+        self.tot += n_updates 
+        self.sum += scatter_add(feats, idxs, dim=0, dim_size=self.n_nodes)
+        self.max = torch.max(self.max, scatter_max(feats, idxs, dim=0, dim_size=self.n_nodes)[0])
 
-        cur_mean = self.sum[idxs] / self.tot[idxs]
+        cur_mean = self.sum / self.tot
 
         '''
         Using Welford's method to calculate running std
@@ -247,8 +168,8 @@ class BatchTGBaseEncoder(StreamTGBaseEncoder):
 
         a_1 = prev_mean * n_updates 
         a_2 = cur_mean * n_updates
-        sum_of_squares = scatter_add(torch.pow(feats, 2), idxs, dim=0)
-        self.S[idxs] += sum_of_squares * a_1 * a_2 
+        sum_of_squares = scatter_add(torch.pow(feats, 2), idxs, dim=0, dim_size=self.n_nodes)
+        self.S += sum_of_squares * a_1 * a_2 
 
 
 class StreamTGBase():
@@ -275,8 +196,9 @@ class StreamTGBase():
         # Neighbors as of this time
         self.neighbors = defaultdict(set)
         self.n_feats = n_feats
+        self.n_nodes = n_nodes 
 
-    def __add_if_unseen(self, idx):
+    def _add_if_unseen(self, idx):
         if idx < self.local.size(0):
             return 
 
@@ -295,9 +217,11 @@ class StreamTGBase():
             torch.zeros(dif)
         ])
 
-    def add_batch(self, src_dst, ts, edge_feat, return_value=False):
+        self.n_nodes = self.local.size(0)
+
+    def add_edge(self, src_dst, ts, edge_feat, return_value=False):
         src,dst = src_dst 
-        self.__add_if_unseen(max(src,dst))
+        self._add_if_unseen(max(src,dst))
 
         # Update ts aggrs
         in_ts = ts - self.last_seen[src, self.IN]
@@ -330,10 +254,6 @@ class StreamTGBase():
             return self.get(src)
 
     def calc_structural(self, idxs=None):
-        # TODO This can be seriously revamped since we're
-        # giving add_batch an edge index. I think we can incorporate this
-        # into the add_batch function 
-
         if idxs is None:
             idxs = list(range(self.local.size(0)))
 
@@ -392,7 +312,7 @@ class StreamTGBase():
         return ret 
 
 class BatchTGBase(StreamTGBase):
-    def __init__(self, n_feats, n_nodes=128):
+    def __init__(self, n_feats, n_nodes=128, undirected_neighborhood_aggr=True):
         super().__init__(n_feats, n_nodes)
 
         # Edge feature aggregators
@@ -406,3 +326,144 @@ class BatchTGBase(StreamTGBase):
         self.in_ts = BatchTGBaseEncoder(1, n_nodes)
         self.out_ts = BatchTGBaseEncoder(1, n_nodes)
         self.bi_ts = BatchTGBaseEncoder(1, n_nodes)
+
+        self.neighbors = set() 
+        self.undirected_neighborhood_aggr = undirected_neighborhood_aggr
+
+    @torch.no_grad()
+    def add_batch(self, ei, ts, edge_feat, return_value=False):
+        self._add_if_unseen(ei.max())
+
+        # Need to incorporate repeats within the batch, 
+        # so have to iterate over whole ei 
+        last_seen_in = []
+        last_seen_out = []
+        last_seen_bi_src = []
+        last_seen_bi_dst = []
+        for i in range(ei.size(1)):
+            t = ts[i]
+            src,dst = ei[:, i]
+            
+            # Get deltas
+            last_seen_in.append(t - self.last_seen[dst, self.IN])
+            last_seen_out.append(t - self.last_seen[src, self.OUT])
+            last_seen_bi_src.append(t - self.last_seen[src, self.BI])
+            last_seen_bi_dst.append(t - self.last_seen[dst, self.BI])
+
+            # Update last seen 
+            self.last_seen[dst, self.IN] = t 
+            self.last_seen[src, self.OUT] = t 
+            self.last_seen[src, self.BI] = self.last_seen[dst, self.BI] = t
+
+            # While we're looping, also want to keep track of 
+            # all unique edges we've seen for structural features
+            self.neighbors.add(
+                (src.item(), dst.item())
+            )
+            if self.undirected_neighborhood_aggr:
+                self.neighbors.add(
+                    (dst.item(), src.item())
+                )
+
+
+        self.in_ts.add(ei[1], torch.tensor(last_seen_in).unsqueeze(-1))
+        self.out_ts.add(ei[0], torch.tensor(last_seen_out).unsqueeze(-1))
+        self.bi_ts.add(
+            ei.reshape(ei.size(1)*2), 
+            torch.tensor(last_seen_bi_src + last_seen_bi_dst).unsqueeze(-1)
+        )
+
+        self.local[:, self.IN] += scatter_add(
+            torch.ones(ei.size(1)), 
+            ei[1], dim=0, dim_size=self.n_nodes
+        )
+        self.local[:, self.OUT] += scatter_add(
+            torch.ones(ei.size(1)),
+            ei[0], dim=0, dim_size=self.n_nodes
+        )
+        self.local[:, self.BI] += scatter_add(
+            torch.ones(ei.size(1)*2),
+            ei.reshape(ei.size(1)*2), dim_size=self.n_nodes
+        )
+
+        # Add edge feature info 
+        self.out_aggr.add(ei[0], edge_feat)
+        self.in_aggr.add(ei[1], edge_feat)
+        self.bi_aggr.add(ei.reshape(ei.size(1)*2), edge_feat.repeat(2,1))
+
+        if return_value:
+            return self.get()
+
+    def calc_structural(self, idxs=None):
+        ei = torch.tensor([*zip(*self.neighbors)])
+
+        args = (self.local[ei[0]], ei[1])
+        kwargs = dict(dim=0)
+        return torch.cat([
+            scatter_add(*args, **kwargs),
+            scatter_mean(*args, **kwargs), 
+            scatter_max(*args, **kwargs)[0],
+            scatter_std(*args, **kwargs)
+        ], dim=1)
+    
+if __name__ == '__main__':
+    ei = torch.tensor([
+        [0,1,1,2,3],
+        [1,2,3,3,0]
+    ])
+    ts = torch.arange(5, dtype=torch.float)
+    ex = torch.tensor([
+        [0.1],
+        [0.2],
+        [0.3],
+        [0.4],
+        [0.5]
+    ])
+
+    tg = BatchTGBase(1, 4)
+    e1 = tg.add_batch(ei, ts, ex, return_value=True)
+    print(e1)
+
+    '''
+    Expected: 
+    Node 0: 
+        i/o/b   
+                    [1,1,2]
+        Neighbors
+            sum     [3,3,6]
+            mean    [1.5,1.5,3]
+            max     [2,2,3],
+            std     [0.5,0.5,0]
+        In feats
+                    [0.5,0.5,0.5, 0]
+        In ts
+                    [5,5,5,0]
+        Out feats
+                    [0.1,0.1,0.1,0]
+        Out ts
+                    [0,0,0,0]
+        Bi feats
+                    [0.6,0.3,0.5,0.2]
+        Bi ts  
+                    [3,6,5,2]
+    
+    Actual: 
+        1.0000, 1.0000, 2.0000
+        
+        3.0000, 3.0000, 6.0000, sum
+        1.5000, 1.5000, 3.0000, mean
+        2.0000, 2.0000, 3.0000, max
+        0.7071, 0.7071, 0.0000, <- std wrong for small counts
+        
+        0.5000, 0.5000, 0.5000, 0.0000, 
+        4.0000, 4.0000, 4.0000, 0.0000, 
+        
+        0.1000, 0.1000, 0.1000, 0.0000,
+        0.0000, 0.0000, 0.0000, 0.0000, 
+        
+        0.6000, 0.3000, 0.5000, 0.0000, 
+        4.0000, 2.0000, 4.0000, 0.0000
+    '''
+
+    e2 = tg.add_batch(ei, ts, ex, return_value=True)
+    print(e2)
