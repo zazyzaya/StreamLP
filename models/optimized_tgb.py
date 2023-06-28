@@ -4,7 +4,7 @@ from collections.abc import Iterable
 import torch 
 from torch_scatter import (
     scatter_add, scatter_mean, 
-    scatter_std, scatter_max
+    scatter_std, scatter_max, scatter_min
 )
 
 '''
@@ -30,6 +30,7 @@ class StreamTGBaseEncoder():
         
         self.sum = torch.zeros(*args)
         self.max = torch.full(args, float('-inf'))
+        self.min = torch.full(args, float('inf'))
         self.n_nodes = num_nodes
 
     def get_value(self, idxs=None):
@@ -44,9 +45,10 @@ class StreamTGBaseEncoder():
         std = torch.sqrt(self.S[idxs] / self.tot[idxs]).nan_to_num(0)
 
         to_tensor = [
-            self.sum[idxs],
+            #self.sum[idxs],
             mean, 
             self.max[idxs],
+            self.min[idxs],
             std 
         ]
 
@@ -79,6 +81,11 @@ class StreamTGBaseEncoder():
             torch.full((dif, self.max.size(1)), float('-inf'))
         ])
 
+        self.min = torch.cat([
+            self.min, 
+            torch.full((dif, self.min.size(1)), float('inf'))
+        ])
+
         self.n_nodes = self.tot.size(0)
 
     def add(self, idx, feat):
@@ -104,6 +111,7 @@ class StreamTGBaseEncoder():
         self.tot[idx] += 1
         self.sum[idx] += feat 
         self.max[idx] = torch.max(self.max[idx], feat)
+        self.min[idx] = torch.min(self.min[idx], feat)
 
         cur_mean = self.sum[idx] / self.tot[idx]
 
@@ -134,14 +142,18 @@ class BatchTGBaseEncoder(StreamTGBaseEncoder):
         if check >= self.tot.size(0):
             self._add_unseen(check)
 
-        prev_mean = (self.sum / self.tot).nan_to_num(0)
+        # Ensure we only touch memory we absolutely need to 
+        unique,reindex = idxs.unique(return_inverse=True)
 
-        n_updates = scatter_add(torch.ones(idxs.size(0),1), idxs, dim=0, dim_size=self.n_nodes)
-        self.tot += n_updates 
-        self.sum += scatter_add(feats, idxs, dim=0, dim_size=self.n_nodes)
-        self.max = torch.max(self.max, scatter_max(feats, idxs, dim=0, dim_size=self.n_nodes)[0])
+        prev_mean = (self.sum[unique] / self.tot[unique]).nan_to_num(0)
+        n_updates = scatter_add(torch.ones(idxs.size(0),1), reindex, dim=0)
+        self.tot[unique] += n_updates 
 
-        cur_mean = self.sum / self.tot
+        self.sum[unique] += scatter_add(feats, reindex, dim=0)
+        self.max[unique] = torch.max(self.max[unique], scatter_max(feats, reindex, dim=0)[0])
+        self.min[unique] = torch.min(self.min[unique], scatter_min(feats, reindex, dim=0)[0])
+
+        cur_mean = self.sum[unique] / self.tot[unique]
 
         '''
         Using Welford's method to calculate running std
@@ -168,8 +180,8 @@ class BatchTGBaseEncoder(StreamTGBaseEncoder):
 
         a_1 = prev_mean * n_updates 
         a_2 = cur_mean * n_updates
-        sum_of_squares = scatter_add(torch.pow(feats, 2), idxs, dim=0, dim_size=self.n_nodes)
-        self.S += sum_of_squares * a_1 * a_2 
+        sum_of_squares = scatter_add(torch.pow(feats, 2), reindex, dim=0)
+        self.S[unique] += sum_of_squares * a_1 * a_2 
 
 
 class StreamTGBase():
@@ -284,9 +296,10 @@ class StreamTGBase():
         args = (src,dst)
 
         structure_cols = [
-            scatter_add(*args,**kwargs),
+            #scatter_add(*args,**kwargs),
             scatter_mean(*args, **kwargs),
             scatter_max(*args, **kwargs)[0],
+            scatter_min(*args, **kwargs)[0],
             scatter_std(*args, **kwargs)
         ]
 
@@ -298,7 +311,7 @@ class StreamTGBase():
         if idx is None:
             idx = torch.arange(self.local.size(0))
 
-        ret = torch.cat([
+        to_tensor = [
             self.local[idx],
             self.calc_structural(idx), 
             self.in_aggr.get_value(idx),
@@ -307,7 +320,9 @@ class StreamTGBase():
             self.out_ts.get_value(idx),
             self.bi_aggr.get_value(idx),
             self.bi_ts.get_value(idx)
-        ], dim=-1) 
+        ]
+
+        ret = torch.cat(to_tensor, dim=-1) 
 
         return ret 
 
@@ -398,11 +413,12 @@ class BatchTGBase(StreamTGBase):
         ei = torch.tensor([*zip(*self.neighbors)])
 
         args = (self.local[ei[0]], ei[1])
-        kwargs = dict(dim=0)
+        kwargs = dict(dim=0, dim_size=self.n_nodes)
         return torch.cat([
-            scatter_add(*args, **kwargs),
+            #scatter_add(*args, **kwargs),
             scatter_mean(*args, **kwargs), 
             scatter_max(*args, **kwargs)[0],
+            scatter_min(*args, **kwargs)[0],
             scatter_std(*args, **kwargs)
         ], dim=1)
     
