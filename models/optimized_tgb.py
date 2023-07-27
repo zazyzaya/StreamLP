@@ -224,9 +224,9 @@ class StreamTGBase():
             torch.zeros(dif, self.local.size(1))
         ], dim=0)
 
-        self.local = torch.cat([
+        self.last_seen = torch.cat([
             self.last_seen,
-            torch.zeros(dif)
+            torch.zeros(dif,3)
         ])
 
         self.n_nodes = self.local.size(0)
@@ -263,7 +263,8 @@ class StreamTGBase():
         self.neighbors[dst.item()].add(src)
 
         if return_value: 
-            return self.get(src)
+            # Return f(src, t) || f(dst, t)
+            return self.get(src_dst).flatten()
 
     def calc_structural(self, idxs=None):
         if idxs is None:

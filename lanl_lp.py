@@ -9,9 +9,9 @@ from tqdm import tqdm
 from models.optimized_tgb import BatchTGBase
 from models.mlp import BinaryClassifier
 
-NUM_NODES = 23156
+NUM_NODES = 29980
 QUANT = 3
-NUM_ETYPES = 58 + QUANT
+NUM_ETYPES = 49 + QUANT
 RAW = '/mnt/raid1_ssd_4tb/datasets/LANL15/torch_data/'
 TG = '/home/ead/iking5/code/StreamLP/lanl-data/'
 
@@ -26,7 +26,13 @@ def build_data_indi():
     def build_single(idx):
         tgb = BatchTGBase(NUM_ETYPES, NUM_NODES)
 
-        g = torch.load(RAW+str(idx)+'.pt')
+        try: 
+            g = torch.load(RAW+str(idx)+'.pt')
+        except FileNotFoundError: 
+            print(f"No file found for {idx}.pt")
+            torch.save(tgb.get(), f'{TG}indipendant/{idx}.pt')
+            return 
+
         st = g.ts[0].item()
         en = st + GRANULARITY
         
@@ -35,19 +41,24 @@ def build_data_indi():
 
         for _ in tqdm(range(batches_per_file), desc=f'{idx+1}/{n_files}'):
             mask = (g.ts >= st).logical_and(g.ts < en)
-            ei = g.edge_index[:, mask]
-            ts = g.ts[mask]
-            ew = g.edge_attr[mask]
+            
+            # Make sure this time step has activity
+            if mask.sum() > 0:
+                ei = g.edge_index[:, mask]
+                ts = g.ts[mask]
+                ew = g.edge_attr[mask]
 
-            tgb.add_batch(
-                ei, ts, ew, 
-            )
+                tgb.add_batch(
+                    ei, ts, ew, 
+                )
+            else:
+                print(f'{idx} from {st}-{en} has no edges')
 
             st = en 
             en += GRANULARITY
 
         torch.save(tgb.get(), f'{TG}indipendant/{idx}.pt')
-    
+
     Parallel(n_jobs=16, prefer='processes', )(
         delayed(build_single)(i) for i in range(n_files)
     )
@@ -88,8 +99,9 @@ def build_data():
             en += GRANULARITY
 
         prog.desc = f'Loading file {i+1}'
-        torch.save(z, f'{TG}{i}.pt')
+        torch.save(z, f'{TG}/continuous/{i}.pt')
 
 
 if __name__ == '__main__':
     build_data_indi()
+    build_data()
