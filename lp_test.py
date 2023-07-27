@@ -145,11 +145,8 @@ def lof(tr_x, te_x, y, knn=20):
 
 def dnn(tr_x, te_x, y): 
     '''
-    Can get scores like this:   
-        AUC: 0.7448  AP: 0.0682
-
-    But that's after 3 epochs and a bunch of loss. When it finally
-    converges, auc is 0.5 and loss is 0.7 (random for bce)
+    Best AUC: 0.8314484898633745 (StrGNN: 0.8179)
+    Best AP: 0.08409933645323109
     '''
     class DNN(nn.Module):
         def __init__(self, hidden):
@@ -163,19 +160,17 @@ def dnn(tr_x, te_x, y):
                 )
 
             self.src = nn.Sequential(
-                block(tr_x.size(1)//2, hidden//2),
-                block(hidden//2, hidden)
+                block(tr_x.size(1)//2, hidden*2),
+                block(hidden*2, hidden)
             )
 
             self.dst = nn.Sequential(
-                block(tr_x.size(1)//2, hidden//2),
-                block(hidden//2, hidden)
+                block(tr_x.size(1)//2, hidden*2),
+                block(hidden*2, hidden)
             )
 
             self.net = nn.Sequential(
-                block(hidden, hidden), 
-                block(hidden, hidden//2), 
-                nn.Linear(hidden//2, 1)
+                nn.Linear(hidden, 1)
             )
 
             self.bce = nn.BCEWithLogitsLoss()
@@ -192,12 +187,13 @@ def dnn(tr_x, te_x, y):
             x = src*dst 
             return self.net(x)
         
-    model = DNN(256)
-    opt = Adam(model.parameters(), lr=0.01)
+    model = DNN(32)
+    opt = Adam(model.parameters(), lr=0.001, weight_decay=0.01)
     labels = torch.zeros(tr_x.size(0)*2,1) 
     labels[tr_x.size(0):] = 1 
 
-    for e in range(1000):
+    best = (float('inf'), None)
+    for e in range(2000):
         fake_src = tr_x[torch.randperm(tr_x.size(0)), :tr_x.size(1)//2]
         fake_dst = tr_x[torch.randperm(tr_x.size(0)), tr_x.size(1)//2:]
         fake_x = torch.cat([fake_src, fake_dst], dim=1)
@@ -208,12 +204,20 @@ def dnn(tr_x, te_x, y):
         loss.backward()
         opt.step()
 
-        print(f"[{e}] Loss: {loss.item():0.2f}", end='')
+        print(f"[{e}] Loss: {loss.item():0.4f}", end='')
 
         with torch.no_grad():
             model.eval()
             preds = torch.sigmoid(model.inference(te_x))
-            print(f"\tAUC: {auc_score(y, preds):0.4f}  AP: {ap_score(y, preds):0.4f}")
+            auc = auc_score(y, preds)
+            ap = ap_score(y, preds)
+
+            print(f"\tAUC: {auc:0.4f}  AP: {ap:0.4f}")
+            if loss.item() < best[0]: 
+                best = (loss.item(), (auc,ap))
+
+    # Best meaning epoch where model had lowest loss (on tr data)
+    print(f"Best AUC: {best[1][0]}\nBest AP: {best[1][1]}")
 
 if __name__ == '__main__':
     #g = torch.load('StrGNN_Data/uci.pt')
