@@ -7,24 +7,28 @@ from tqdm import tqdm
 
 HOME = 'StrGNN_Data/'
 
-def load_uci(force=False):
-    if os.path.exists(HOME + 'uci.pt') and not force:
-        return torch.load(HOME+'uci.pt')
+def load_network_repo(fname='uci', force=False):
+    if os.path.exists(f'{HOME}/{fname}.pt') and not force:
+        return torch.load(f'{HOME}/{fname}.pt')
 
-    f = open(HOME+'uci.txt', 'r')
+    f = open(f'{HOME}/{fname}.txt', 'r')
 
     f.readline()
-    meta = f.readline()[2:-1].split(' ')
+    line = f.readline()
 
-    n_edges = int(meta[0])
-    n_nodes = int(meta[1]) 
+    if line.startswith('%'):
+        meta = line[2:-1].split(' ')
+        n_edges = int(meta[0])
+        line = f.readline()
+    else:
+        n_edges = None 
+        n_nodes = None 
 
     src = []
     dst = []
     weights = []
     ts = []
 
-    line = f.readline()
     prog = tqdm(total=n_edges)
     while line: 
         s,d,w,t = line.split(' ')
@@ -41,18 +45,24 @@ def load_uci(force=False):
     prog.close() 
 
     ei = torch.tensor([src,dst])-1 # Idx starts at 1 for some reason 
-    ew = torch.tensor(weights, dtype=torch.float)
+    ew = torch.tensor(weights, dtype=torch.float).unsqueeze(-1)
     ts = torch.tensor(ts, dtype=torch.float)
+
+    # Not guaranteed to be in order
+    ts, reidx = ts.sort()
+    ei = ei[:, reidx]
+    ew = ew[reidx]
 
     # Norm to start at 0 
     ts = ts-ts[0]
 
+    n_nodes = ei.max()+1
     data = Data(
         edge_index=ei, 
         edge_attr=ew, 
         ts=ts, 
-        num_nodes=n_nodes-1
+        num_nodes=n_nodes
     )
 
-    torch.save(data, HOME+'uci.pt')
+    torch.save(data, f'{HOME}/{fname}.pt')
     return data 

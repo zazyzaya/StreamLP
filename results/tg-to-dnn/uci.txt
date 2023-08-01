@@ -1,0 +1,31 @@
+Continuous TGB, 16-hidden, 1%
+Best AUC: 0.781659389622605
+Best AP: 0.10140671434247914
+
+Continuous TGB, 32-hidden, 1%
+Best AUC: 0.8168782855971315
+Best AP: 0.07667094679127354
+
+Continuous TGB, 32-hidden, 1% sum aggr added in 
+Best AUC: 0.8183073310079882
+Best AP: 0.11492741541265403
+
+Continuous TGB, 32-hidden, 1%, with scaling
+Best AUC: 0.22073584184731465
+Best AP: 0.005946000578291523
+
+Continuous TGB, 32-hidden, 1% sum aggr added in, with scaling
+Best AUC: 0.44084790512126676
+Best AP: 0.008714901198530533
+
+Continuous TGB, 64-hidden, 1%
+Best AUC: 0.8026752499194566
+Best AP: 0.09281881449226823
+
+Continuous TGB, 64-hidden, 1% sum aggr added in 
+Best AUC: 0.8100890483039371
+Best AP: 0.04900929005296078
+
+Indi TGB, 32-hidden, 1%
+Best AUC: 0.49324306951822167
+Best AP: 0.009574329952639973

@@ -293,7 +293,7 @@ class StreamTGBase():
         kwargs = dict(dim=0, dim_size=num_nodes)
 
         dst = ei[0].unsqueeze(-1)
-        src = self.local[ei[1]]
+        src = self.local[ei[1]] # / (1+self.local[ei[1]].sum(dim=1, keepdim=True))
         args = (src,dst)
 
         structure_cols = [
@@ -313,7 +313,7 @@ class StreamTGBase():
             idx = torch.arange(self.local.size(0))
 
         to_tensor = [
-            self.local[idx],
+            self.local[idx], #/ (1+self.local[idx].sum(dim=1, keepdim=True)),
             self.calc_structural(idx), 
             self.in_aggr.get_value(idx),
             self.in_ts.get_value(idx),
@@ -397,6 +397,7 @@ class BatchTGBase(StreamTGBase):
             torch.ones(ei.size(1)),
             ei[0], dim=0, dim_size=self.n_nodes
         )
+
         self.local[:, self.BI] += scatter_add(
             torch.ones(ei.size(1)*2),
             ei.reshape(ei.size(1)*2), dim_size=self.n_nodes
@@ -413,7 +414,7 @@ class BatchTGBase(StreamTGBase):
     def calc_structural(self, idxs=None):
         ei = torch.tensor([*zip(*self.neighbors)])
 
-        args = (self.local[ei[0]], ei[1])
+        args = (self.local[ei[0]] / (1+self.local[ei[0]].sum(dim=1, keepdim=True)), ei[1])
         kwargs = dict(dim=0, dim_size=self.n_nodes)
         return torch.cat([
             #scatter_add(*args, **kwargs),
