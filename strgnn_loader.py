@@ -56,6 +56,9 @@ def load_network_repo(fname='uci', force=False):
     # Norm to start at 0 
     ts = ts-ts[0]
 
+    # Norm ts to be in terms of days
+    ts = ts / (60*60*24)
+
     n_nodes = ei.max()+1
     data = Data(
         edge_index=ei, 

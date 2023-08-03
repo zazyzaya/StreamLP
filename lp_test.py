@@ -3,6 +3,7 @@ from random import randint
 import sys 
 
 import numpy as np 
+import pandas as pd 
 from sklearn.ensemble import BaggingClassifier
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.metrics import (
@@ -80,7 +81,7 @@ def generate_tg(tr,te, indi=False):
         tr_edges.append(
             tgb.add_edge(
                 tr.edge_index[:, i],
-                tr.ts[i] // SECONDS_PER_DAY, 
+                tr.ts[i], 
                 tr.edge_attr[i], 
                 return_value=True 
             )
@@ -93,7 +94,7 @@ def generate_tg(tr,te, indi=False):
         te_edges.append(
             tgb.add_edge(
                 te.edge_index[:, i],
-                te.ts[i] // SECONDS_PER_DAY, 
+                te.ts[i], 
                 te.edge_attr[i], 
                 return_value=True 
             )
@@ -115,13 +116,13 @@ def generate_fold_daily_tg(g, tgb=None):
 
     gs = []
 
-    st_day = int((g.ts[0] // SECONDS_PER_DAY).item())
-    en_day = int((g.ts[-1] // SECONDS_PER_DAY).item())
+    st_day = int((g.ts[0]).item())
+    en_day = int((g.ts[-1]).item())
     for d in tqdm(range(st_day, en_day+1)): 
         mask = (
-            g.ts >= d * SECONDS_PER_DAY
+            g.ts >= d
         ).logical_and(
-            g.ts < (d+1) * SECONDS_PER_DAY
+            g.ts < (d+1)
         )
 
         if mask.sum() == 0: 
@@ -267,7 +268,7 @@ def dnn(tr_x, te_x, y, hidden):
             return self.net(x)
         
     model = DNN(hidden)
-    opt = Adam(model.parameters(), lr=0.001, weight_decay=0.01)
+    opt = Adam(model.parameters(), lr=0.001, weight_decay=0.001)
     labels = torch.zeros(tr_x.size(0)*2,1) 
     labels[tr_x.size(0):] = 1 
 
@@ -301,31 +302,29 @@ def dnn(tr_x, te_x, y, hidden):
     print(f"Best AUC: {best[1][0]}\nBest AP: {best[1][1]}")
 
 def dnn_pipeline(fname, hidden=32): 
-    g = load_network_repo(fname=fname)
-    tr, te = insert_anoms(g)
-    tr, te, y = generate_tg(tr, te)
-    torch.save({'tr':tr, 'te':te, 'y':y}, f'StrGNN_Data/{fname}-tgb.pt')
+    #g = load_network_repo(fname=fname, force=True)
+    #tr, te = insert_anoms(g)
+    #tr, te, y = generate_tg(tr, te)
+    #torch.save({'tr':tr, 'te':te, 'y':y}, f'StrGNN_Data/{fname}-tgb.pt')
     
-    #data = torch.load(f'StrGNN_Data/{fname}-tgb.pt')
-    #tr = data['tr']; te = data['te']; y = data['y']
+    data = torch.load(f'StrGNN_Data/{fname}-tgb.pt')
+    tr = data['tr']; te = data['te']; y = data['y']
 
     dnn(tr, te, y, hidden)
 
-def gcn(tr_gs, te_gs): 
-    '''
-    Best AUC: 0.8314484898633745 (StrGNN: 0.8179)
-    Best AP: 0.08409933645323109
-    '''
+def gcn(tr_gs, te_gs, hidden, rnd=0): 
     class GCN(nn.Module):
         def __init__(self, hidden, latent=32):
             super().__init__() 
-            self.in_gcn = GCNConv(tr_gs[0].x.size(1), hidden)
-            #self.hidden = GCNConv(hidden, hidden)
+            self.in_gcn = GCNConv(tr_gs[0].x.size(1)+rnd, hidden)
+            self.hidden = GCNConv(hidden, hidden)
             self.out = GCNConv(hidden, hidden)
+
+            self.rnd = torch.rand(tr_gs[0].x.size(0), rnd)
 
             # Doing in the style of jumping knowledge net
             self.net = nn.Sequential(
-                nn.Linear(hidden*2, hidden),
+                nn.Linear(hidden, hidden),
                 nn.ReLU(),
                 nn.Linear(hidden, latent),
                 nn.ReLU()
@@ -336,65 +335,68 @@ def gcn(tr_gs, te_gs):
             self.bce = nn.BCEWithLogitsLoss()
 
         def forward(self, x, ei, edges, labels): 
-            x1 = torch.relu(self.in_gcn(x, ei))
-            #x2 = torch.relu(self.hidden(x1, ei))
-            x3 = torch.relu(self.out(x1, ei))
+            x = torch.cat([x, self.rnd], dim=1)
 
-            x = torch.cat([x1,x3], dim=1)
+            x1 = torch.relu(self.in_gcn(x, ei))
+            x2 = torch.relu(self.hidden(x1, ei))
+            x3 = torch.relu(self.out(x2, ei))
+
+            x = x3 #torch.cat([x1,x2,x3], dim=1)
             z = self.net(x) 
             preds = self.pred(z[edges[0]] * z[edges[1]])
 
             return self.bce(preds, labels)
 
         def inference(self, x, ei, edges):
-            x1 = torch.relu(self.in_gcn(x, ei))
-            #x2 = torch.relu(self.hidden(x1, ei))
-            x3 = torch.relu(self.out(x1, ei))
+            x = torch.cat([x, self.rnd], dim=1)
 
-            x = torch.cat([x1,x3], dim=1)
+            x1 = torch.relu(self.in_gcn(x, ei))
+            x2 = torch.relu(self.hidden(x1, ei))
+            x3 = torch.relu(self.out(x2, ei))
+
+            x = x3 #torch.cat([x1,x2,x3], dim=1)
             z = self.net(x)
 
             return torch.sigmoid(
                 self.pred(z[edges[0]] * z[edges[1]])
             )
         
-    model = GCN(64)
-    opt = Adam(model.parameters(), lr=0.01)
+    model = GCN(hidden)
+    opt = Adam(model.parameters(), lr=0.001)
 
     print()
     best = (float('inf'), None)
 
-    # Prepend last tr embedding to test so they can use the 
-    # node features from the previous timestamps
-    te_gs = [tr_gs[-1]] + te_gs 
-
-    for e in range(2000):
+    for e in range(50):
         model.train()
-        for i in range(1, len(tr_gs)):
+        opt.zero_grad()
+        for i in range(len(tr_gs)):
             x = tr_gs[i].x            # Use previous encoding as features
             ei = tr_gs[i].edge_index    # To predict on current edges
+            edges = tr_gs[i].edge_index
 
             fake_edges = torch.randint(0, tr_gs[0].num_nodes, (ei.size()))
-            edges = torch.cat([ei, fake_edges], dim=1)
+            edges = torch.cat([edges, fake_edges], dim=1)
             labels = torch.zeros((edges.size(1),1))
             labels[ei.size(1):] = 1
 
-            opt.zero_grad()
+            
             loss = model(x, ei, edges, labels)
             loss.backward()
-            opt.step()
-
-        print(f"\r[{e}] Loss: {loss.item():0.4E}", end='')
+            
+            print(f"\r[{e}-{i}] Loss: {loss.item():0.4E}", end='')
+        opt.step()
 
         with torch.no_grad():
             model.eval()
             preds = []
             y = []
 
-            for i in range(1, len(te_gs)): 
+            for i in range(len(te_gs)): 
                 x = te_gs[i].x 
                 ei = te_gs[i].edge_index
-                preds.append(model.inference(x, ei, ei))
+                edges = te_gs[i].edge_index
+                preds.append(model.inference(x, ei, edges))
                 y.append(te_gs[i].y)
 
             y = torch.cat(y)
@@ -410,14 +412,26 @@ def gcn(tr_gs, te_gs):
 
     # Best meaning epoch where model had lowest loss (on tr data)
     print(f"Best AUC: {best[1][0]}\nBest AP: {best[1][1]}")
+    return {'auc': best[1][0],
+            'ap' : best[1][1],
+            'hidden': hidden,
+            'rnd': rnd}
 
 
-def gnn_pipeline(fname): 
+def gcn_pipeline(fname, hidden=64): 
     g = load_network_repo(fname=fname, force=True)
     tr, te = insert_anoms(g) 
     tr_gs, te_gs = generate_daily_tg(tr, te)
 
-    gcn(tr_gs, te_gs)
+    rows = []
+    for r in [0, 8, 16, 32]:
+        for h in [16,32,64]:
+            rows.append(gcn(tr_gs, te_gs, hidden=h, rnd=r))
+
+    df = pd.DataFrame(rows)
+    df.to_csv(f'results/tg-to-gnn/{fname}.csv', sep='\t')
 
 if __name__ == '__main__':
-    dnn_pipeline(sys.argv[1], hidden=int(sys.argv[2]))
+    #dnn_pipeline(sys.argv[1], int(sys.argv[2]))
+    gcn_pipeline(sys.argv[1], int(sys.argv[2]))
+    #gcn_pipeline('uci', 32)

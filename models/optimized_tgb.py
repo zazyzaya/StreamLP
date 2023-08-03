@@ -314,7 +314,7 @@ class StreamTGBase():
 
         to_tensor = [
             self.local[idx], #/ (1+self.local[idx].sum(dim=1, keepdim=True)),
-            self.calc_structural(idx), 
+            #self.calc_structural(idx), 
             self.in_aggr.get_value(idx),
             self.in_ts.get_value(idx),
             self.out_aggr.get_value(idx),
@@ -359,12 +359,15 @@ class BatchTGBase(StreamTGBase):
         for i in range(ei.size(1)):
             t = ts[i]
             src,dst = ei[:, i]
+
+            # If this is the first time we've ever seen this node, make 
+            # the last seen time now (e.g. zero delta)
             
             # Get deltas
-            last_seen_in.append(t - self.last_seen[dst, self.IN])
-            last_seen_out.append(t - self.last_seen[src, self.OUT])
-            last_seen_bi_src.append(t - self.last_seen[src, self.BI])
-            last_seen_bi_dst.append(t - self.last_seen[dst, self.BI])
+            last_seen_in.append(t - self.last_seen[dst, self.IN] if self.last_seen[dst, self.IN] else 0)
+            last_seen_out.append(t - self.last_seen[src, self.OUT] if self.last_seen[src, self.OUT] else 0)
+            last_seen_bi_src.append(t - self.last_seen[src, self.BI] if self.last_seen[src, self.BI] else 0)
+            last_seen_bi_dst.append(t - self.last_seen[dst, self.BI] if self.last_seen[dst, self.BI] else 0)
 
             # Update last seen 
             self.last_seen[dst, self.IN] = t 
@@ -397,11 +400,11 @@ class BatchTGBase(StreamTGBase):
             torch.ones(ei.size(1)),
             ei[0], dim=0, dim_size=self.n_nodes
         )
-
         self.local[:, self.BI] += scatter_add(
             torch.ones(ei.size(1)*2),
             ei.reshape(ei.size(1)*2), dim_size=self.n_nodes
         )
+        
 
         # Add edge feature info 
         self.out_aggr.add(ei[0], edge_feat)

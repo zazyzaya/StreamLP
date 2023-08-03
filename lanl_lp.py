@@ -45,7 +45,7 @@ def build_data_indi():
             # Make sure this time step has activity
             if mask.sum() > 0:
                 ei = g.edge_index[:, mask]
-                ts = g.ts[mask]
+                ts = g.ts[mask] / (60*60*24)
                 ew = g.edge_attr[mask]
 
                 tgb.add_batch(
@@ -87,7 +87,7 @@ def build_data():
             
             mask = (g.ts >= st).logical_and(g.ts < en)
             ei = g.edge_index[:, mask]
-            ts = g.ts[mask]
+            ts = g.ts[mask] / (60*60*24)
             ew = g.edge_attr[mask]
 
             z = tgb.add_batch(
