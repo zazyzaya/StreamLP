@@ -21,7 +21,7 @@ from torch.optim import Adam
 from tqdm import tqdm 
 
 from strgnn_loader import load_network_repo
-from models.optimized_tgb import StreamTGBase, BatchTGBase
+from models.long_term_tgb import StreamTGBase, BatchTGBase
 
 SECONDS_PER_DAY = 60*60*24
 
@@ -149,7 +149,7 @@ def generate_fold_daily_tg(g, tgb=None):
 
     return tgb, gs
 
-def generate_daily_tg(tr,te):
+def generate_daily_tg(tr,te, eye=False):
     '''
     Given tr graph and te graph, generate dynamic 
     node features for each fold 
@@ -167,8 +167,12 @@ def generate_daily_tg(tr,te):
 
     for t in tr_x: 
         t.x = torch.from_numpy(feat_fixer.transform(t.x))
+        if eye: 
+            t.x = torch.cat([t.x, torch.eye(t.x.size(0))], dim=1)
     for t in te_x: 
         t.x = torch.from_numpy(feat_fixer.transform(t.x))
+        if eye: 
+            t.x = torch.cat([t.x, torch.eye(t.x.size(0))], dim=1)
 
     return tr_x, te_x 
 
@@ -324,7 +328,7 @@ def gcn(tr_gs, te_gs, hidden, rnd=0):
 
             # Doing in the style of jumping knowledge net
             self.net = nn.Sequential(
-                nn.Linear(hidden, hidden),
+                nn.Linear(hidden*3, hidden),
                 nn.ReLU(),
                 nn.Linear(hidden, latent),
                 nn.ReLU()
@@ -341,7 +345,7 @@ def gcn(tr_gs, te_gs, hidden, rnd=0):
             x2 = torch.relu(self.hidden(x1, ei))
             x3 = torch.relu(self.out(x2, ei))
 
-            x = x3 #torch.cat([x1,x2,x3], dim=1)
+            x = torch.cat([x1,x2,x3], dim=1)
             z = self.net(x) 
             preds = self.pred(z[edges[0]] * z[edges[1]])
 
@@ -354,7 +358,7 @@ def gcn(tr_gs, te_gs, hidden, rnd=0):
             x2 = torch.relu(self.hidden(x1, ei))
             x3 = torch.relu(self.out(x2, ei))
 
-            x = x3 #torch.cat([x1,x2,x3], dim=1)
+            x = torch.cat([x1,x2,x3], dim=1)
             z = self.net(x)
 
             return torch.sigmoid(
@@ -367,7 +371,7 @@ def gcn(tr_gs, te_gs, hidden, rnd=0):
     print()
     best = (float('inf'), None)
 
-    for e in range(50):
+    for e in range(100):
         model.train()
         opt.zero_grad()
         for i in range(len(tr_gs)):
@@ -424,14 +428,13 @@ def gcn_pipeline(fname, hidden=64):
     tr_gs, te_gs = generate_daily_tg(tr, te)
 
     rows = []
-    for r in [0, 8, 16, 32]:
-        for h in [16,32,64]:
-            rows.append(gcn(tr_gs, te_gs, hidden=h, rnd=r))
+    for h in [16,32,64]:
+        rows.append(gcn(tr_gs, te_gs, hidden=h, rnd=0))
 
     df = pd.DataFrame(rows)
-    df.to_csv(f'results/tg-to-gnn/{fname}.csv', sep='\t')
+    df.to_csv(f'results/tg-to-gnn/{fname}-no_adding.csv', sep='\t')
 
 if __name__ == '__main__':
     #dnn_pipeline(sys.argv[1], int(sys.argv[2]))
-    gcn_pipeline(sys.argv[1], int(sys.argv[2]))
+    gcn_pipeline(sys.argv[1])
     #gcn_pipeline('uci', 32)
