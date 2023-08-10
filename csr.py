@@ -78,13 +78,13 @@ class EdgeAttrAccesser:
 
             rets.append((ts,ew))
 
-        return rets 
+        return zip(*rets)
 
     def get_src(self, idx, max_time): 
         return self.get(idx, max_time, self.src_ptr, self.src_idx)
     def get_dst(self, idx, max_time): 
         return self.get(idx, max_time, self.dst_ptr, self.dst_idx)
-    def get_both(self, idx, max_time): 
+    def get_bi(self, idx, max_time): 
         return self.get(idx, max_time, self.both_ptr, self.both_idx)
     
 if __name__ == '__main__':
