@@ -39,16 +39,16 @@ class GCN(nn.Module):
                 nn.Linear(hidden, hidden),
                 nn.ReLU(),
                 nn.Linear(hidden, latent),
-                nn.ReLU()
+                #nn.ReLU()
             )
 
-        self.pred = nn.Linear(latent, 1)
+        #self.pred = nn.Linear(latent, 1)
         self.bce = nn.BCEWithLogitsLoss()
 
-    def forward(self, x, edges, neg): 
+    def forward(self, x, edges, pos, neg): 
         z = self.embed(x, edges)
-        pos = self.pred(z[edges[0]] * z[edges[1]])
-        neg = self.pred(z[neg[0]] * z[neg[1]])
+        pos = (z[pos[0]] * z[pos[1]]).sum(dim=1, keepdim=True)
+        neg = (z[neg[0]] * z[neg[1]]).sum(dim=1, keepdim=True)
 
         return (
             self.bce(pos, torch.ones(pos.size(0),1)) + 
@@ -72,5 +72,5 @@ class GCN(nn.Module):
 
     def inference(self, z, edges):
         return torch.sigmoid(
-            self.pred(z[edges[0]] * z[edges[1]])
+            (z[edges[0]] * z[edges[1]]).sum(dim=1, keepdim=True)
         )
